@@ -6,6 +6,7 @@ from email.header import decode_header
 from bs4 import BeautifulSoup
 import time
 import logging
+import traceback
 
 # Your email credentials
 email_user = "helloworld@newslettermonster.com"
@@ -55,7 +56,18 @@ def process_email(msg_id, email_message):
         os.makedirs(email_folder, exist_ok=True)
 
         html, _ = extract_html_and_css(email_message)
-        soup = BeautifulSoup(html, "lxml")
+
+        # Check if HTML content is empty
+        if not html:
+            logger.warning(f"Empty HTML content in email {msg_id}. Skipping.")
+            return
+
+        try:
+            soup = BeautifulSoup(html, "lxml")
+        except Exception as parse_error:
+            logger.error(f"Error parsing HTML for email {msg_id}: {parse_error}")
+            traceback.print_exc()
+            return
 
         filename = f"{email_folder}/{safe_subject}.html"
         with open(filename, "w", encoding="utf-8") as file:
@@ -81,6 +93,7 @@ def process_email(msg_id, email_message):
                 
     except Exception as fetch_error:
         logger.error(f"Error processing email {msg_id}: {fetch_error}")
+        traceback.print_exc()
 
 # Create a directory to store extracted HTML files
 output_folder = "extracted"
@@ -109,6 +122,7 @@ def main():
                     process_email(msg_id, email_message)
             except Exception as processing_error:
                 logger.error(f"Error processing emails: {processing_error}")
+                traceback.print_exc()
             finally:
                 mail.logout()
                 break
