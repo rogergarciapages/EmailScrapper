@@ -20,7 +20,7 @@ Takes Screenshot of all mails in jpg ~~and webp~~ format for a later use.
 * ~~webptools~~
 * asyncio
 
-##Future updates:
+## Future updates:
 
 Remove ads from emails.
 
