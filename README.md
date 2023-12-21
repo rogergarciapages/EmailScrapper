@@ -9,3 +9,12 @@ Downloads the real subject
 Downloads sent date
 
 Takes Screenshot of all mails in jpg and webp format for a later use.
+
+## Libraries used
+imaplib
+BeautifulSoup
+Pillow
+Pyppeteer
+webptools
+asyncio
+
