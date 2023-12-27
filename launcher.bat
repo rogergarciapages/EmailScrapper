@@ -1,7 +1,7 @@
 @echo off
 echo Running IMAP email scraper from server...
-python C:\path\to\your\script1.py
+python D:\Python\NewsletterMonstr\emailbot.py
 echo Scraper script 1 completed.
 echo Running Screenshooter Email...
-python C:\path\to\your\script2.py
+python D:\Python\NewsletterMonstr\screenshooter.py
 echo Script 2 completed.
