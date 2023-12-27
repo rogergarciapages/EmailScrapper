@@ -8,6 +8,7 @@ Pulls emails from imap folder and takes screenshots like a champ.
 * Respects all CSS formats.
 * Downloads the real subject
 * Downloads sent date
+* Archive processed emails
 
 Takes Screenshot of all mails in jpg ~~and webp~~ format for a later use.
 
