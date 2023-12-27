@@ -7,14 +7,35 @@ from bs4 import BeautifulSoup
 import time
 import logging
 import traceback
+import json
+import sys
+import pandas as pd
 
-# Your email credentials
-email_user = "helloworld@newslettermonster.com"
-email_pass = "10digitpin"
+# Get the absolute path to the script's directory
+script_dir = os.path.dirname(os.path.abspath(__file__))
+
+# Set the path to the credentials file
+credentials_path = os.path.join(script_dir, 'D:\\Python\\NewsletterMonstr\\credentials.json')
+
+# Read credentials from JSON file
+try:
+    with open(credentials_path, 'r') as file:
+        credentials = json.load(file)
+    email_user = credentials.get('email_user')
+    email_pass = credentials.get('email_pass')
+except FileNotFoundError:
+    print(f"ERROR:__main__:Credentials file '{credentials_path}' not found. Please create the file.")
+    sys.exit(1)
 
 # Configure the logging module
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Load credentials from JSON file
+credentials_file = "credentials.json"
+
+# Create an empty list to store data for the Pandas DataFrame
+data_list = []
 
 def connect_to_imap():
     """Connect to the IMAP server."""
@@ -55,7 +76,7 @@ def process_email(msg_id, email_message):
         email_folder = os.path.join(output_folder, safe_subject)
         os.makedirs(email_folder, exist_ok=True)
 
-        html, _ = extract_html_and_css(email_message)
+        html, css = extract_html_and_css(email_message)
 
         # Check if HTML content is empty
         if not html:
@@ -90,7 +111,10 @@ def process_email(msg_id, email_message):
             received_date_filename = f"{email_folder}/received_date.txt"
             with open(received_date_filename, "w", encoding="utf-8") as received_date_file:
                 received_date_file.write(received_date_str)
-                
+
+        # Append data to the list for Pandas DataFrame
+        data_list.append([sender_address, subject, html])
+
     except Exception as fetch_error:
         logger.error(f"Error processing email {msg_id}: {fetch_error}")
         traceback.print_exc()
@@ -120,9 +144,11 @@ def main():
                     email_message = email.message_from_bytes(raw_email)
 
                     process_email(msg_id, email_message)
+                    
             except Exception as processing_error:
                 logger.error(f"Error processing emails: {processing_error}")
                 traceback.print_exc()
+                
             finally:
                 mail.logout()
                 break
@@ -133,6 +159,13 @@ def main():
 
     if retry_count == max_retries:
         logger.error("Failed to connect to the IMAP server after multiple retries.")
+        
+    # Create a Pandas DataFrame
+    columns = ['sender', 'email_subject', 'html_css_code']
+    df = pd.DataFrame(data_list, columns=columns)
+
+    # Display the DataFrame
+    print(df)
 
 if __name__ == "__main__":
     main()
