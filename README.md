@@ -20,6 +20,7 @@ Takes Screenshot of all mails in jpg ~~and webp~~ format for a later use.
 * Pyppeteer
 * ~~webptools~~
 * asyncio
+* pandas
 
 ## Future updates:
 
