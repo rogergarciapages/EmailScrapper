@@ -64,5 +64,12 @@ try:
 
                 print(f"Screenshots saved: {screenshot_path}, {cropped_screenshot_path}")
 
+                # Move the folder to processed_folder
+                current_date_time = datetime.now().strftime("%Y%m%d_%H%M%S")
+                processed_subfolder = os.path.join(processed_folder, current_date_time)
+                os.makedirs(processed_subfolder, exist_ok=True)
+                os.rename(folder_path, os.path.join(processed_subfolder, folder_name))
+                print(f"Folder moved to: {processed_subfolder}")
+
 except Exception as e:
     print(f"An error occurred while processing folders: {e}")
