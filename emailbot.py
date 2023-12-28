@@ -163,9 +163,14 @@ def main():
     # Create a Pandas DataFrame
     columns = ['sender', 'email_subject', 'html_css_code']
     df = pd.DataFrame(data_list, columns=columns)
+    
+    # Export the DataFrame to a TSV file
+    tsv_file_path = os.path.join(os.getcwd(), "ScraperOutput.tsv")
+    df.to_csv(tsv_file_path, sep='\t', index=False)
 
     # Display the DataFrame
     print(df)
+    print(f"\nDataFrame exported to: {tsv_file_path}")
 
 if __name__ == "__main__":
     main()
