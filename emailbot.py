@@ -78,9 +78,9 @@ def process_email(msg_id, email_message):
 
         html, css = extract_html_and_css(email_message)
 
-        # Check if HTML content is empty
+        # Check if HTML content is empty or None
         if not html:
-            logger.warning(f"Empty HTML content in email {msg_id}. Skipping.")
+            logger.warning(f"Empty or None HTML content in email {msg_id}. Skipping.")
             return
 
         try:
@@ -104,7 +104,7 @@ def process_email(msg_id, email_message):
         sender_filename = f"{email_folder}/sender.txt"
         with open(sender_filename, "w", encoding="utf-8") as sender_file:
             sender_file.write(sender_address)
-            
+
         received_date = email.utils.parsedate(email_message.get("Date"))
         if received_date:
             received_date_str = time.strftime("%Y-%m-%d %H:%M:%S", received_date)
