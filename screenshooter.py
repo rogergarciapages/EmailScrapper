@@ -16,7 +16,7 @@ async def capture_screenshot(html_file_path, screenshot_path):
         await asyncio.sleep(5)
 
         # Skip screenshot capture if HTML file is monsterrealemailsubject.html
-        if not html_file_path.lower().endswith('monsterrealemailsubject.html'):
+        if os.path.basename(html_file_path).lower() != 'monsterrealemailsubject.html':
             # Take a screenshot of the whole page
             await page.screenshot({'path': screenshot_path, 'fullPage': True})
     except Exception as e:
