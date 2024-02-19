@@ -1,3 +1,8 @@
 # Ignore the /extracted folder
 /extracted/
 /archived/
+/venv/
+/Crawlr/
+/venv/
+/Old/
+.env
