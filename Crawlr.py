@@ -51,6 +51,8 @@ def extract_html(email_msg):
     if html is None:
         logger.warning("No HTML content found in the email.")
     else:
+        print("SUPABASE_URL:", os.getenv('SUPABASE_URL'))
+        print("SUPABASE_KEY:", os.getenv('SUPABASE_KEY'))
         logger.info("HTML content extracted successfully")
         logger.debug(f"HTML content: {html}")  # Add this line to log the HTML content
         # Parse HTML content using BeautifulSoup
