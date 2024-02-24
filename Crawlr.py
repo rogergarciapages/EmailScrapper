@@ -9,6 +9,7 @@ from botocore.exceptions import NoCredentialsError
 from datetime import datetime
 from supabase import create_client
 from bs4 import BeautifulSoup
+import time
 
 # Configure logging
 LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
@@ -146,7 +147,7 @@ def insert_to_supabase(subject, sender, date):
         # Check if response contains data
         if response.data:
             # Extract the ID from the response
-            id = response.data[0]["id"]  # Extracting the 'id' from the response data
+            id = response.data[0]["id"]  
             return id
         else:
             logger.error("No data found in Supabase response")
@@ -156,6 +157,18 @@ def insert_to_supabase(subject, sender, date):
         traceback.print_exc()
         return None
 
+# Update processing time in Supabase
+def update_processing_time(uuid, processing_time):
+    try:
+        # Update record in Supabase table with processing time
+        supabase.table("TableN1").update({
+            "date_processed": processing_time,
+        }).eq("id", uuid).execute()
+        logger.info("Processing time updated in Supabase")
+    except Exception as e:
+        logger.error
+        logger.error(f"Error updating processing time in Supabase: {e}")
+        traceback.print_exc()
 
 # Main function
 if __name__ == "__main__":
