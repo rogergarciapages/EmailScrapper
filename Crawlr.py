@@ -55,12 +55,9 @@ def extract_html(email_msg):
         print("SUPABASE_URL:", os.getenv('SUPABASE_URL'))
         print("SUPABASE_KEY:", os.getenv('SUPABASE_KEY'))
         logger.info("HTML content extracted successfully")
-        logger.debug(f"HTML content: {html}")  # Add this line to log the HTML content
+        logger.debug(f"HTML content: {html}")  # log the HTML content
         # Parse HTML content using BeautifulSoup
         soup = BeautifulSoup(html, 'html.parser')
-        # Optionally, you can perform further processing or manipulation of the HTML content here
-        # For example:
-        # soup.find('a').extract()  # Remove all <a> tags from the HTML content
         html = soup.prettify()  # Convert BeautifulSoup object back to prettified HTML string
     return html
 
@@ -108,7 +105,7 @@ def process_email(email_msg):
 
         # Get HTML content
         html = extract_html(email_msg)
-        logger.debug(f"HTML content after extraction: {html}")  # Add this line to log the HTML content
+        logger.debug(f"HTML content after extraction: {html}")  # log the HTML content
 
         # Skip processing if html is None
         if html is None:
@@ -117,7 +114,7 @@ def process_email(email_msg):
 
         # Insert record into Supabase
         uuid = insert_to_supabase(subject, sender, date)
-        logger.debug(f"UUID: {uuid}")  # Add this line to log the UUID
+        logger.debug(f"UUID: {uuid}")  # log the UUID
 
         # Save HTML content to a local file
         file_path = f"{uuid}.html"
@@ -128,7 +125,7 @@ def process_email(email_msg):
         # Upload file to S3
         if uuid:
             s3_key = upload_to_s3(html, uuid)
-            logger.debug(f"S3 key: {s3_key}")  # Add this line to log the S3 key
+            logger.debug(f"S3 key: {s3_key}")  # log the S3 key
     except Exception as e:
         logger.error(f"Error processing email: {e}")
         traceback.print_exc()
