@@ -126,9 +126,15 @@ def process_email(email_msg):
         if uuid:
             s3_key = upload_to_s3(html, uuid)
             logger.debug(f"S3 key: {s3_key}")  # log the S3 key
+
+        # Mark email as "read"
+        mail.store(email_msg.uid, '+FLAGS', '\Seen')
+        logger.info("Email marked as read")
+
     except Exception as e:
         logger.error(f"Error processing email: {e}")
         traceback.print_exc()
+
 
 # Insert record into Supabase
 def insert_to_supabase(subject, sender, date):
