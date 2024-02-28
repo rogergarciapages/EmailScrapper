@@ -5,6 +5,8 @@ import imaplib
 import email
 from email.header import decode_header
 import boto3
+import botocore.session
+import botocore.exceptions
 from botocore.exceptions import NoCredentialsError
 from datetime import datetime
 from supabase import create_client
@@ -26,8 +28,8 @@ EMAIL_USER = os.getenv('EMAIL_USER')
 EMAIL_PASS = os.getenv('EMAIL_PASS')
 
 # S3 credentials
-AWS_ACCESS_KEY_ID = os.getenv('AWS_ACCESS_KEY_ID')
-AWS_SECRET_ACCESS_KEY = os.getenv('AWS_SECRET_ACCESS_KEY')
+AWS_ACCESS_KEY_ID = 'AKIATRCKY7JRGRJ3SMGP' #os.getenv('AWS_ACCESS_KEY_ID')
+AWS_SECRET_ACCESS_KEY ='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' #os.getenv('AWS_SECRET_ACCESS_KEY')
 S3_BUCKET = os.getenv('AWS_S3_BUCKET_NAME')
 
 # Connect to IMAP server
@@ -40,6 +42,11 @@ def connect_to_imap():
         logger.error(f"IMAP connection error: {e}")
         traceback.print_exc()
         return None
+
+# Get email subject
+def get_email_subject(email_msg):
+    subject, _ = decode_header(email_msg["Subject"])[0]
+    return subject.decode() if isinstance(subject, bytes) else subject
 
 # Extract HTML content from email
 def extract_html(email_msg):
@@ -64,28 +71,29 @@ def extract_html(email_msg):
 # Upload HTML content to S3
 def upload_to_s3(html, uuid):
     try:
-        s3 = boto3.client('s3', aws_access_key_id=AWS_ACCESS_KEY_ID, 
+        s3 = boto3.client('s3', 
+                          aws_access_key_id=AWS_ACCESS_KEY_ID,
                           aws_secret_access_key=AWS_SECRET_ACCESS_KEY)
         # Generate S3 key with UUID
         key = f"{uuid}.html"
         # Upload HTML content to S3 bucket
-        s3.put_object(Body=html.encode(), Bucket=str(S3_BUCKET), Key=key)
+        s3.put_object(Body=html.encode(), Bucket=S3_BUCKET, Key=key)
         logger.info("HTML uploaded to S3")
         return key
-    except NoCredentialsError:
-        logger.error("Invalid AWS credentials")
+    except botocore.exceptions.ClientError as e:
+        error_code = e.response.get('Error', {}).get('Code')
+        if error_code == 'InvalidAccessKeyId':
+            logger.error("Invalid AWS access key ID provided.")
+        elif error_code == 'InvalidSecretAccessKey':
+            logger.error("Invalid AWS secret access key provided.")
+        else:
+            logger.error(f"S3 upload error: {e}")
         traceback.print_exc()
         return None
     except Exception as e:
         logger.error(f"S3 upload error: {e}")
         traceback.print_exc()
         return None
-
-
-# Get email subject 
-def get_email_subject(email_msg):
-    subject, _ = decode_header(email_msg["Subject"])[0]
-    return subject.decode() if isinstance(subject, bytes) else subject
 
 # Get email sender
 def get_email_sender(email_msg):
@@ -96,7 +104,7 @@ def get_email_date(email_msg):
     return email.utils.parsedate_to_datetime(email_msg.get("Date"))
 
 # Process an email
-def process_email(email_msg):
+def process_email(email_msg, msg_id):
     try:
         # Extract info from email
         subject = get_email_subject(email_msg)
@@ -122,14 +130,17 @@ def process_email(email_msg):
             file.write(html)
         logger.info("HTML content saved to local file")
 
+
         # Upload file to S3
         if uuid:
             s3_key = upload_to_s3(html, uuid)
             logger.debug(f"S3 key: {s3_key}")  # log the S3 key
 
         # Mark email as "read"
-        mail.store(email_msg.uid, '+FLAGS', '\Seen')
+        uid = mail.fetch(msg_id, '(UID)')[1][0].split()[2]  # Extract UID
+        mail.store(msg_id, '+FLAGS', '\\Seen')
         logger.info("Email marked as read")
+
 
     except Exception as e:
         logger.error(f"Error processing email: {e}")
@@ -182,7 +193,7 @@ if __name__ == "__main__":
             mail.select('INBOX')
 
             # Get all message IDs
-            _, msg_ids = mail.search(None, 'ALL')
+            _, msg_ids = mail.search(None, 'UNSEEN')  # Only fetch unseen emails
             msg_ids = msg_ids[0].split()
 
             # Process each email
@@ -191,7 +202,7 @@ if __name__ == "__main__":
                 email_msg = email.message_from_bytes(msg_data[0][1])
                 # Log the subject of the email message
                 logger.info(f"Processing email with subject: {get_email_subject(email_msg)}")
-                process_email(email_msg)
+                process_email(email_msg, msg_id)
 
         except Exception as e:
             logger.error(f"Error processing emails: {e}")
