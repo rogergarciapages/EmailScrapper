@@ -8,10 +8,9 @@ import boto3
 import botocore.session
 import botocore.exceptions
 from botocore.exceptions import NoCredentialsError
-from datetime import datetime
+import datetime
 from supabase import create_client
 from bs4 import BeautifulSoup
-import time
 
 # Configure logging
 LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
@@ -22,14 +21,15 @@ logger = logging.getLogger(__name__)
 SUPABASE_URL = os.getenv('SUPABASE_URL')
 SUPABASE_KEY = os.getenv('SUPABASE_KEY')
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+BASE_URL = "https://newslettermonster.com/"
 
 # Email credentials
 EMAIL_USER = os.getenv('EMAIL_USER')
 EMAIL_PASS = os.getenv('EMAIL_PASS')
 
 # S3 credentials
-AWS_ACCESS_KEY_ID = 'AKIATRCKY7JRGRJ3SMGP' #os.getenv('AWS_ACCESS_KEY_ID')
-AWS_SECRET_ACCESS_KEY ='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' #os.getenv('AWS_SECRET_ACCESS_KEY')
+AWS_ACCESS_KEY_ID = "AKIATRCKY7JRGRJ3SMGP" #os.getenv('AWS_ACCESS_KEY_ID')
+AWS_SECRET_ACCESS_KEY = "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" #os.getenv('AWS_SECRET_ACCESS_KEY')
 S3_BUCKET = os.getenv('AWS_S3_BUCKET_NAME')
 
 # Connect to IMAP server
@@ -59,8 +59,6 @@ def extract_html(email_msg):
     if html is None:
         logger.warning("No HTML content found in the email.")
     else:
-        print("SUPABASE_URL:", os.getenv('SUPABASE_URL'))
-        print("SUPABASE_KEY:", os.getenv('SUPABASE_KEY'))
         logger.info("HTML content extracted successfully")
         logger.debug(f"HTML content: {html}")  # log the HTML content
         # Parse HTML content using BeautifulSoup
@@ -130,6 +128,12 @@ def process_email(email_msg, msg_id):
             file.write(html)
         logger.info("HTML content saved to local file")
 
+        # Capture the current date and time when the email is processed
+        processed_time = datetime.datetime.now()
+
+        # Update Supabase with processing time
+        if uuid:
+            update_processing_time(uuid, processed_time)
 
         # Upload file to S3
         if uuid:
@@ -141,11 +145,9 @@ def process_email(email_msg, msg_id):
         mail.store(msg_id, '+FLAGS', '\\Seen')
         logger.info("Email marked as read")
 
-
     except Exception as e:
         logger.error(f"Error processing email: {e}")
         traceback.print_exc()
-
 
 # Insert record into Supabase
 def insert_to_supabase(subject, sender, date):
@@ -176,11 +178,10 @@ def update_processing_time(uuid, processing_time):
     try:
         # Update record in Supabase table with processing time
         supabase.table("TableN1").update({
-            "date_processed": processing_time,
+            "date_processed": processing_time.isoformat(),  # Convert to ISO format string
         }).eq("id", uuid).execute()
         logger.info("Processing time updated in Supabase")
     except Exception as e:
-        logger.error
         logger.error(f"Error updating processing time in Supabase: {e}")
         traceback.print_exc()
 
@@ -209,4 +210,4 @@ if __name__ == "__main__":
             traceback.print_exc()
         finally:
             # Close IMAP connection
-            mail.logout()
+            mail.logout()       
