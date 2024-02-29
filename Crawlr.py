@@ -77,7 +77,15 @@ def upload_to_s3(html, uuid):
         # Upload HTML content to S3 bucket
         s3.put_object(Body=html.encode(), Bucket=S3_BUCKET, Key=key)
         logger.info("HTML uploaded to S3")
-        return key
+        
+        # Construct URL of the uploaded object
+        object_url = f"https://{S3_BUCKET}.s3.amazonaws.com/{key}"
+        logger.info(f"S3 object URL: {object_url}")
+        
+        # Update Supabase with S3 object URL
+        update_supabase_with_s3_link(uuid, object_url)
+        
+        return object_url
     except botocore.exceptions.ClientError as e:
         error_code = e.response.get('Error', {}).get('Code')
         if error_code == 'InvalidAccessKeyId':
@@ -92,6 +100,18 @@ def upload_to_s3(html, uuid):
         logger.error(f"S3 upload error: {e}")
         traceback.print_exc()
         return None
+
+# Update Supabase with S3 object URL
+def update_supabase_with_s3_link(uuid, object_url):
+    try:
+        # Update record in Supabase table with the S3 object URL
+        supabase.table("TableN1").update({
+            "S3link": object_url,
+        }).eq("id", uuid).execute()
+        logger.info("S3 object URL updated in Supabase")
+    except Exception as e:
+        logger.error(f"Error updating S3 object URL in Supabase: {e}")
+        traceback.print_exc()
 
 # Get email sender
 def get_email_sender(email_msg):
