@@ -28,8 +28,8 @@ EMAIL_USER = os.getenv('EMAIL_USER')
 EMAIL_PASS = os.getenv('EMAIL_PASS')
 
 # S3 credentials
-AWS_ACCESS_KEY_ID = "AKIATRCKY7JRGRJ3SMGP" #os.getenv('AWS_ACCESS_KEY_ID')
-AWS_SECRET_ACCESS_KEY = "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" #os.getenv('AWS_SECRET_ACCESS_KEY')
+AWS_ACCESS_KEY_ID = os.getenv('AWS_ACCESS_KEY_ID')
+AWS_SECRET_ACCESS_KEY = os.getenv('AWS_SECRET_ACCESS_KEY')
 S3_BUCKET = os.getenv('AWS_S3_BUCKET_NAME')
 
 # Connect to IMAP server
@@ -101,6 +101,22 @@ def get_email_sender(email_msg):
 def get_email_date(email_msg):
     return email.utils.parsedate_to_datetime(email_msg.get("Date"))
 
+# Generate slug
+def generate_slug(uuid):
+    return f"{BASE_URL}{uuid}.html"
+
+# Update slug in Supabase
+def update_slug(uuid, slug):
+    try:
+        # Update record in Supabase table with the generated slug
+        supabase.table("TableN1").update({
+            "slug": slug,
+        }).eq("id", uuid).execute()
+        logger.info("Slug updated in Supabase")
+    except Exception as e:
+        logger.error(f"Error updating slug in Supabase: {e}")
+        traceback.print_exc()
+
 # Process an email
 def process_email(email_msg, msg_id):
     try:
@@ -127,6 +143,11 @@ def process_email(email_msg, msg_id):
         with open(file_path, 'w', encoding='utf-8') as file:
             file.write(html)
         logger.info("HTML content saved to local file")
+
+        # Generate and update slug
+        if uuid:
+            slug = generate_slug(uuid)
+            update_slug(uuid, slug)
 
         # Capture the current date and time when the email is processed
         processed_time = datetime.datetime.now()
