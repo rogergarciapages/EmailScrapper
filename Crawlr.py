@@ -138,6 +138,7 @@ def update_slug(uuid, slug):
         traceback.print_exc()
 
 # Process an email
+# Process an email
 def process_email(email_msg, msg_id):
     try:
         # Extract info from email
@@ -180,6 +181,10 @@ def process_email(email_msg, msg_id):
         if uuid:
             s3_key = upload_to_s3(html, uuid)
             logger.debug(f"S3 key: {s3_key}")  # log the S3 key
+            
+            # Delete local HTML file after uploading to S3
+            os.remove(file_path)
+            logger.info("Local HTML file deleted after uploading to S3")
 
         # Mark email as "read"
         uid = mail.fetch(msg_id, '(UID)')[1][0].split()[2]  # Extract UID
@@ -189,6 +194,7 @@ def process_email(email_msg, msg_id):
     except Exception as e:
         logger.error(f"Error processing email: {e}")
         traceback.print_exc()
+
 
 # Insert record into Supabase
 def insert_to_supabase(subject, sender, date):
