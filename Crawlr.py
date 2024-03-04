@@ -257,4 +257,4 @@ if __name__ == "__main__":
             traceback.print_exc()
         finally:
             # Close IMAP connection
-            mail.logout()       
+            mail.logout()
