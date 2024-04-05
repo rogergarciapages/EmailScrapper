@@ -14,6 +14,20 @@ from bs4 import BeautifulSoup
 import asyncio
 from pyppeteer import launch, errors
 from PIL import Image
+import ctypes, sys
+
+def is_admin():
+    try:
+        return ctypes.windll.shell32.IsUserAnAdmin()
+    except:
+        return False
+
+if is_admin():
+    # Code of your program here
+        print("I'm an admin!")
+else:
+    # Re-run the program with admin rights
+    ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, " ".join(sys.argv), None, 1)
 
 # Configure logging
 LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
@@ -259,7 +273,7 @@ async def take_screenshots(html, uuid):
     global browser  # Use the global browser variable
     
     try:
-        browser = await launch(headless=True)
+        browser = await launch(executablePath="C:\\Users\\Usuario\\Documents\\GitHub\\chrome-driver\\chrome.exe", headless=True)
         page = await browser.newPage()
         await page.setContent(html)
         
@@ -267,13 +281,13 @@ async def take_screenshots(html, uuid):
         await page.waitForSelector('body')
         
         # Take full-height screenshot
-        full_height_path = f"{uuid}_full.webp"
+        full_height_path = f"{uuid}_full.png"
         await page.setViewport({'width': 900, 'height': 100})
-        await page.screenshot({'path': full_height_path, 'fullPage': True})
+        await page.screenshot({'path': full_height_path, 'fullPage': True,'type': 'png'})
         logger.info(f"Full-height screenshot saved: {full_height_path}")
         
         # Take 900x900 screenshot
-        thumb_path = f"{uuid}_thumb.webp"
+        thumb_path = f"{uuid}_thumb.png"
         await page.setViewport({'width': 900, 'height': 900})
         await page.evaluate('window.scrollTo(0, 125)')  # Scroll down to leave a gap of 125px
         await page.screenshot({'path': thumb_path})
