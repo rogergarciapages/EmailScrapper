@@ -1,4 +1,7 @@
 import os
+import re
+import binascii
+import base64
 import logging
 import traceback
 import asyncio
@@ -117,6 +120,41 @@ def upload_to_s3(image_path, uuid_val):
         logger.error(f"Error uploading image to S3: {e}")
         traceback.print_exc()
 
+# Function to decode subject line if encoded
+def decode_subject(subject):
+    # Check if subject is encoded using Base64
+    if subject.startswith('=?utf-8?B?') and subject.endswith('?='):
+        # Remove encoding prefix and suffix
+        encoded_subject = subject[len('=?utf-8?B?'):-len('?=')]
+        # Decode Base64 and return decoded subject
+        decoded_subject = base64.b64decode(encoded_subject).decode('utf-8', errors='ignore')
+    else:
+        # If subject is not encoded, return the subject as is
+        decoded_subject = subject
+
+    return decoded_subject
+
+# Function to decode subject line if encoded
+def decode_subject(subject):
+    # Check if subject is encoded using Base64
+    if subject.startswith('=?utf-8?B?') and subject.endswith('?='):
+        # Remove encoding prefix and suffix
+        encoded_subject = subject[len('=?utf-8?B?'):-len('?=')]
+        # Decode Base64 and return decoded subject
+        return base64.b64decode(encoded_subject).decode('utf-8', errors='ignore')
+    else:
+        return subject
+
+# Extract sender's name from email address
+def extract_sender_name(sender):
+    # Check if sender is enclosed in double quotes
+    match = re.match(r'"([^"]*)"', sender)
+    if match:
+        return match.group(1)  # Return text within double quotes
+    else:
+        # Extract part of sender's email address before '<'
+        return sender.split('<')[0].strip()
+
 # Main function
 async def main():
     # Connect to IMAP server
@@ -136,6 +174,13 @@ async def main():
             _, msg_data = mail.fetch(latest_msg_id, '(RFC822)')
             email_msg = email.message_from_bytes(msg_data[0][1])
 
+            # Decode subject line if encoded
+            subject_decoded = decode_subject(email_msg['Subject'])
+
+            # Extract sender's name from email address
+            sender_email = email_msg['From']
+            sender_name = extract_sender_name(sender_email)
+
             # Extract HTML content from email
             html_content = get_email_html(email_msg)
             if html_content:
@@ -143,13 +188,12 @@ async def main():
                 uuid_val = str(uuid.uuid4())
 
                 # Fill Supabase table with email details
-                sender = email_msg['From']
-                subject = email_msg['Subject']
-                real_title = ''.join(ch for ch in subject if ch.isalnum() or ch.isspace())
+                real_title = ''.join(ch for ch in subject_decoded if ch.isalnum() or ch.isspace())
                 created_at = datetime.now().isoformat()
                 supabase.table("TableN1").insert({
-                    "subject": subject,
-                    "sender": sender,
+                    "subject": subject_decoded,  # Use decoded subject
+                    "sender": sender_email,  # Keep original sender format
+                    "company": sender_name,  # Insert cleaned sender's name into 'company' column
                     "created_at": created_at,
                     "real_title": real_title,
                 }).execute()
