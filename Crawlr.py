@@ -7,7 +7,8 @@ import traceback
 import asyncio
 import imaplib
 import email
-from email.header import decode_header
+from email.header import decode_header, Header
+from email.errors import HeaderParseError
 from datetime import datetime
 import uuid
 import boto3
@@ -15,7 +16,6 @@ from supabase import create_client
 from bs4 import BeautifulSoup
 import playwright
 from playwright.async_api import async_playwright
-
 
 # Configure logging
 LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
@@ -73,7 +73,15 @@ async def take_screenshot(html_content, uuid_val):
         page = await browser.new_page()
 
         try:
-            await page.set_content(html_content)
+            # Set the viewport size to capture full height
+            await page.evaluate('''() => {
+                const body = document.querySelector('body');
+                const height = Math.max(body.scrollHeight, body.offsetHeight, body.clientHeight);
+                return { width: 900, height };
+            }''')
+
+            # Wait for a specific element to appear indicating that the page is fully loaded
+            await page.wait_for_selector('body')
 
             # Take a full-page screenshot
             full_screenshot_path = f"{uuid_val}_full.png"
@@ -90,6 +98,7 @@ async def take_screenshot(html_content, uuid_val):
             # Upload screenshots to S3
             upload_to_s3(full_screenshot_path, uuid_val)
             upload_to_s3(thumb_screenshot_path, uuid_val)
+
         except Exception as e:
             logger.error(f"Error taking screenshots: {e}")
             traceback.print_exc()
@@ -98,7 +107,7 @@ async def take_screenshot(html_content, uuid_val):
                 await page.close()
             if browser:
                 await browser.close()
-                
+
 # Upload screenshot to S3
 def upload_to_s3(image_path, uuid_val):
     try:
@@ -120,40 +129,26 @@ def upload_to_s3(image_path, uuid_val):
         logger.error(f"Error uploading image to S3: {e}")
         traceback.print_exc()
 
-# Function to decode subject line if encoded
+# Decode subject line if encoded
 def decode_subject(subject):
-    # Check if subject is encoded using Base64
-    if subject.startswith('=?utf-8?B?') and subject.endswith('?='):
-        # Remove encoding prefix and suffix
-        encoded_subject = subject[len('=?utf-8?B?'):-len('?=')]
-        # Decode Base64 and return decoded subject
-        decoded_subject = base64.b64decode(encoded_subject).decode('utf-8', errors='ignore')
-    else:
-        # If subject is not encoded, return the subject as is
-        decoded_subject = subject
+    try:
+        # Decode subject line using decode_header
+        decoded_parts = decode_header(subject)
+        decoded_subject = ''.join(part[0].decode(part[1] or 'utf-8') if isinstance(part[0], bytes) else part[0] for part in decoded_parts)
+        return decoded_subject
+    except HeaderParseError as e:
+        logger.error(f"Error decoding subject: {e}")
+        return subject  # Return original subject if decoding fails
 
-    return decoded_subject
-
-# Function to decode subject line if encoded
-def decode_subject(subject):
-    # Check if subject is encoded using Base64
-    if subject.startswith('=?utf-8?B?') and subject.endswith('?='):
-        # Remove encoding prefix and suffix
-        encoded_subject = subject[len('=?utf-8?B?'):-len('?=')]
-        # Decode Base64 and return decoded subject
-        return base64.b64decode(encoded_subject).decode('utf-8', errors='ignore')
-    else:
-        return subject
-
-# Extract sender's name from email address
-def extract_sender_name(sender):
-    # Check if sender is enclosed in double quotes
-    match = re.match(r'"([^"]*)"', sender)
-    if match:
-        return match.group(1)  # Return text within double quotes
-    else:
-        # Extract part of sender's email address before '<'
-        return sender.split('<')[0].strip()
+# Decode sender email address if encoded
+def decode_sender(sender):
+    try:
+        decoded_parts = decode_header(sender)
+        decoded_sender = ''.join(part[0].decode(part[1] or 'utf-8') if isinstance(part[0], bytes) else part[0] for part in decoded_parts)
+        return decoded_sender
+    except Exception as e:
+        logger.error(f"Error decoding sender: {e}")
+        return sender  # Return original sender if decoding fails
 
 # Main function
 async def main():
@@ -177,9 +172,11 @@ async def main():
             # Decode subject line if encoded
             subject_decoded = decode_subject(email_msg['Subject'])
 
-            # Extract sender's name from email address
-            sender_email = email_msg['From']
-            sender_name = extract_sender_name(sender_email)
+            # Decode sender's name and email address
+            sender_email = decode_sender(email_msg['From'])
+
+            # Extract sender's name from decoded sender
+            sender_name = sender_email.split('<')[0].strip().replace('"', '')
 
             # Extract HTML content from email
             html_content = get_email_html(email_msg)
@@ -187,15 +184,16 @@ async def main():
                 # Generate UUID for the current processing
                 uuid_val = str(uuid.uuid4())
 
-                # Fill Supabase table with email details
+                # Fill Supabase table with email details (only insert once per email)
                 real_title = ''.join(ch for ch in subject_decoded if ch.isalnum() or ch.isspace())
                 created_at = datetime.now().isoformat()
                 supabase.table("TableN1").insert({
                     "subject": subject_decoded,  # Use decoded subject
-                    "sender": sender_email,  # Keep original sender format
+                    "sender": sender_email,  # Use decoded sender email
                     "company": sender_name,  # Insert cleaned sender's name into 'company' column
                     "created_at": created_at,
                     "real_title": real_title,
+                    "uuid_script": uuid_val  # Insert UUID into 'uuid_script' column
                 }).execute()
 
                 # Save HTML content to a local file
