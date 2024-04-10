@@ -66,7 +66,6 @@ def get_email_html(email_msg):
             break
     return html
 
-# Function to take screenshots
 async def take_screenshot(html_content, uuid_val):
     async with playwright.async_api.async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
@@ -77,20 +76,29 @@ async def take_screenshot(html_content, uuid_val):
             await page.evaluate('''() => {
                 const body = document.querySelector('body');
                 const height = Math.max(body.scrollHeight, body.offsetHeight, body.clientHeight);
-                return { width: 900, height };
+                return { width: 680, height };
             }''')
 
-            # Wait for a specific element to appear indicating that the page is fully loaded
-            await page.wait_for_selector('body')
+            # Navigate to a blank page to ensure the HTML content is fully loaded
+            await page.goto("about:blank")
+
+            # Wait for the page to finish loading
+            await page.wait_for_load_state("networkidle")
+
+            # Set the HTML content
+            await page.set_content(html_content)
+
+            # Set viewport width to 680px for full-page screenshot
+            await page.set_viewport_size({"width": 680, "height": page.viewport_size["height"]})
 
             # Take a full-page screenshot
             full_screenshot_path = f"{uuid_val}_full.png"
             await page.screenshot(path=full_screenshot_path, full_page=True)
             logger.info(f"Full-page screenshot saved: {full_screenshot_path}")
 
-            # Take a cropped screenshot (900x900)
+            # Take a cropped screenshot (680x900)
             thumb_screenshot_path = f"{uuid_val}_small.png"
-            await page.set_viewport_size({'width': 900, 'height': 900})
+            await page.set_viewport_size({"width": 680, "height": 900})
             await page.evaluate('window.scrollTo(0, 0)')
             await page.screenshot(path=thumb_screenshot_path)
             logger.info(f"Thumbnail screenshot saved: {thumb_screenshot_path}")
@@ -107,6 +115,7 @@ async def take_screenshot(html_content, uuid_val):
                 await page.close()
             if browser:
                 await browser.close()
+
 
 # Upload screenshot to S3
 def upload_to_s3(image_path, uuid_val):
