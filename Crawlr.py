@@ -223,7 +223,8 @@ async def main():
                             "company": sender_name,  # Insert cleaned sender's name into 'company' column
                             "created_at": created_at,
                             "real_title": real_title,
-                            "uuid_script": uuid_val  # Insert UUID into 'uuid_script' column
+                            "uuid_script": uuid_val,  # Insert UUID into 'uuid_script' column
+                            "date_processed": created_at  # Insert the date and time of processing
                         }).execute()
 
                         # Save HTML content to a local file
@@ -237,8 +238,32 @@ async def main():
                                           aws_secret_access_key=AWS_SECRET_ACCESS_KEY)
                         s3.put_object(Body=html_content.encode(), Bucket=S3_BUCKET, Key=f"{uuid_val}/{uuid_val}.html")
 
+                        # After uploading HTML file to S3
+                        html_s3_link = f"https://nlmr1.s3.eu-central-1.amazonaws.com/{uuid_val}/{uuid_val}.html"
+
+                        # Update Supabase table with S3 link to HTML file
+                        supabase.table("TableN1").update({
+                            "S3link_html": html_s3_link
+                        }).eq("uuid_script", uuid_val).execute()
+
+                        # Generate URL for small webp image
+                        small_webp_url = f"https://nlmr1.s3.eu-central-1.amazonaws.com/{uuid_val}/{uuid_val}_small.webp"
+
+                        # Generate URL for full webp image
+                        full_webp_url = f"https://nlmr1.s3.eu-central-1.amazonaws.com/{uuid_val}/{uuid_val}_full.webp"
+
+                        # Insert URLs into Supabase
+                        supabase.table("TableN1").update({
+                            "small_url_Webp": small_webp_url,
+                            "full_url_Webp": full_webp_url
+                        }).eq("uuid_script", uuid_val).execute()                        
+
                         # Take screenshots and upload them to S3
                         await take_screenshot(html_content, uuid_val)
+
+                        # Delete the local HTML file
+                        os.remove(html_file_path)
+                        logger.info(f"Local HTML file deleted after uploading to S3: {html_file_path}")
                     else:
                         logger.warning("No HTML content found in the email.")
             else:
