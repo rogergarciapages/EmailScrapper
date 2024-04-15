@@ -16,6 +16,7 @@ from supabase import create_client
 from bs4 import BeautifulSoup
 import playwright
 from playwright.async_api import async_playwright
+from PIL import Image
 
 # Configure logging
 LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
@@ -103,9 +104,13 @@ async def take_screenshot(html_content, uuid_val):
             await page.screenshot(path=thumb_screenshot_path)
             logger.info(f"Thumbnail screenshot saved: {thumb_screenshot_path}")
 
-            # Upload screenshots to S3
-            upload_to_s3(full_screenshot_path, uuid_val)
-            upload_to_s3(thumb_screenshot_path, uuid_val)
+            # Convert screenshots to WebP format
+            await convert_to_webp(full_screenshot_path)
+            await convert_to_webp(thumb_screenshot_path)
+
+            # Upload WebP screenshots to S3
+            await upload_to_s3(full_screenshot_path.replace(".png", ".webp"), uuid_val)
+            await upload_to_s3(thumb_screenshot_path.replace(".png", ".webp"), uuid_val)
 
         except Exception as e:
             logger.error(f"Error taking screenshots: {e}")
@@ -116,9 +121,24 @@ async def take_screenshot(html_content, uuid_val):
             if browser:
                 await browser.close()
 
+async def convert_to_webp(image_path):
+    try:
+        # Open the PNG image
+        with Image.open(image_path) as img:
+            # Save the image in WebP format
+            webp_path = os.path.splitext(image_path)[0] + ".webp"
+            img.save(webp_path, "webp")
+            logger.info(f"Image converted to WebP: {webp_path}")
 
-# Upload screenshot to S3
-def upload_to_s3(image_path, uuid_val):
+            # Remove local PNG file after conversion
+        os.remove(image_path)
+        logger.info(f"Local PNG file deleted after conversion: {image_path}")
+
+    except Exception as e:
+        logger.error(f"Error converting image to WebP: {e}")
+        traceback.print_exc()
+
+async def upload_to_s3(image_path, uuid_val):
     try:
         s3 = boto3.client('s3', 
                           aws_access_key_id=AWS_ACCESS_KEY_ID,
@@ -129,7 +149,7 @@ def upload_to_s3(image_path, uuid_val):
 
         # Upload image to S3 bucket
         with open(image_path, 'rb') as f:
-            s3.put_object(Body=f, Bucket=S3_BUCKET, Key=f"{uuid_val}/{key}", ContentType='image/png')
+            s3.put_object(Body=f, Bucket=S3_BUCKET, Key=f"{uuid_val}/{key}", ContentType='image/webp')
 
         # Remove local image file after uploading to S3
         os.remove(image_path)
@@ -161,74 +181,76 @@ def decode_sender(sender):
 
 # Main function
 async def main():
-    # Connect to IMAP server
-    mail = connect_to_imap()
-    if not mail:
-        logger.error("Failed to connect to IMAP server. Exiting.")
-        return
+    while True:
+        # Connect to IMAP server
+        mail = connect_to_imap()
+        if not mail:
+            logger.error("Failed to connect to IMAP server. Exiting.")
+            return
 
-    try:
-        # Select inbox
-        mail.select('INBOX')
+        try:
+            # Select inbox
+            mail.select('INBOX')
 
-        # Search for latest unseen message
-        _, msg_ids = mail.search(None, 'UNSEEN')
-        if msg_ids:
-            latest_msg_id = msg_ids[0].split()[-1]
-            _, msg_data = mail.fetch(latest_msg_id, '(RFC822)')
-            email_msg = email.message_from_bytes(msg_data[0][1])
+            # Search for latest unseen message
+            _, msg_ids = mail.search(None, 'UNSEEN')
+            if msg_ids:
+                for msg_id in msg_ids[0].split():
+                    _, msg_data = mail.fetch(msg_id, '(RFC822)')
+                    email_msg = email.message_from_bytes(msg_data[0][1])
 
-            # Decode subject line if encoded
-            subject_decoded = decode_subject(email_msg['Subject'])
+                    # Decode subject line if encoded
+                    subject_decoded = decode_subject(email_msg['Subject'])
 
-            # Decode sender's name and email address
-            sender_email = decode_sender(email_msg['From'])
+                    # Decode sender's name and email address
+                    sender_email = decode_sender(email_msg['From'])
 
-            # Extract sender's name from decoded sender
-            sender_name = sender_email.split('<')[0].strip().replace('"', '')
+                    # Extract sender's name from decoded sender
+                    sender_name = sender_email.split('<')[0].strip().replace('"', '')
 
-            # Extract HTML content from email
-            html_content = get_email_html(email_msg)
-            if html_content:
-                # Generate UUID for the current processing
-                uuid_val = str(uuid.uuid4())
+                    # Extract HTML content from email
+                    html_content = get_email_html(email_msg)
+                    if html_content:
+                        # Generate UUID for the current processing
+                        uuid_val = str(uuid.uuid4())
 
-                # Fill Supabase table with email details (only insert once per email)
-                real_title = ''.join(ch for ch in subject_decoded if ch.isalnum() or ch.isspace())
-                created_at = datetime.now().isoformat()
-                supabase.table("TableN1").insert({
-                    "subject": subject_decoded,  # Use decoded subject
-                    "sender": sender_email,  # Use decoded sender email
-                    "company": sender_name,  # Insert cleaned sender's name into 'company' column
-                    "created_at": created_at,
-                    "real_title": real_title,
-                    "uuid_script": uuid_val  # Insert UUID into 'uuid_script' column
-                }).execute()
+                        # Fill Supabase table with email details (only insert once per email)
+                        real_title = ''.join(ch for ch in subject_decoded if ch.isalnum() or ch.isspace())
+                        created_at = datetime.now().isoformat()
+                        supabase.table("TableN1").insert({
+                            "subject": subject_decoded,  # Use decoded subject
+                            "sender": sender_email,  # Use decoded sender email
+                            "company": sender_name,  # Insert cleaned sender's name into 'company' column
+                            "created_at": created_at,
+                            "real_title": real_title,
+                            "uuid_script": uuid_val  # Insert UUID into 'uuid_script' column
+                        }).execute()
 
-                # Save HTML content to a local file
-                html_file_path = f"{uuid_val}.html"
-                with open(html_file_path, 'w', encoding='utf-8') as file:
-                    file.write(html_content)
+                        # Save HTML content to a local file
+                        html_file_path = f"{uuid_val}.html"
+                        with open(html_file_path, 'w', encoding='utf-8') as file:
+                            file.write(html_content)
 
-                # Upload HTML file to S3
-                s3 = boto3.client('s3', 
-                                  aws_access_key_id=AWS_ACCESS_KEY_ID,
-                                  aws_secret_access_key=AWS_SECRET_ACCESS_KEY)
-                s3.put_object(Body=html_content.encode(), Bucket=S3_BUCKET, Key=f"{uuid_val}/{uuid_val}.html")
+                        # Upload HTML file to S3
+                        s3 = boto3.client('s3', 
+                                          aws_access_key_id=AWS_ACCESS_KEY_ID,
+                                          aws_secret_access_key=AWS_SECRET_ACCESS_KEY)
+                        s3.put_object(Body=html_content.encode(), Bucket=S3_BUCKET, Key=f"{uuid_val}/{uuid_val}.html")
 
-                # Take screenshots and upload them to S3
-                await take_screenshot(html_content, uuid_val)
+                        # Take screenshots and upload them to S3
+                        await take_screenshot(html_content, uuid_val)
+                    else:
+                        logger.warning("No HTML content found in the email.")
             else:
-                logger.warning("No HTML content found in the email.")
-        else:
-            logger.info("No unseen messages found in the inbox.")
+                logger.info("No unseen messages found in the inbox.")
 
-    except Exception as e:
-        logger.error(f"Error processing emails: {e}")
-        traceback.print_exc()
-    finally:
-        # Close IMAP connection
-        mail.logout()
+        except Exception as e:
+            logger.error(f"Error processing emails: {e}")
+            traceback.print_exc()
+        finally:
+            # Close IMAP connection
+            mail.logout()
+            await asyncio.sleep(60)  # Wait for 60 seconds before processing next batch of emails
 
 if __name__ == "__main__":
     asyncio.run(main())
