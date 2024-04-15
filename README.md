@@ -12,6 +12,7 @@
 
 
 Using these libraries: Playwright, Beautifulsoup, PIL, imaplib, boto, s3, supabase (among others)
+
 Taking screenshots in headlessmode.
 
   
