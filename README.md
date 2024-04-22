@@ -10,6 +10,10 @@
 * updates Supabase db with S3 Objects url.
 * maks emails as read.
 
+[] mark html files as text
+[] connect supabase api to frontend
+[] create categories db
+
 
 Using these libraries: Playwright, Beautifulsoup, PIL, imaplib, boto, s3, supabase (among others)
 
