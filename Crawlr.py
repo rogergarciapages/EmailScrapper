@@ -232,11 +232,11 @@ async def main():
                         with open(html_file_path, 'w', encoding='utf-8') as file:
                             file.write(html_content)
 
-                        # Upload HTML file to S3
+                        # Upload HTML file to S3 with correct content type
                         s3 = boto3.client('s3', 
                                           aws_access_key_id=AWS_ACCESS_KEY_ID,
                                           aws_secret_access_key=AWS_SECRET_ACCESS_KEY)
-                        s3.put_object(Body=html_content.encode(), Bucket=S3_BUCKET, Key=f"{uuid_val}/{uuid_val}.html")
+                        s3.put_object(Body=html_content.encode(), Bucket=S3_BUCKET, Key=f"{uuid_val}/{uuid_val}.html", ContentType='text/html')
 
                         # After uploading HTML file to S3
                         html_s3_link = f"https://nlmr1.s3.eu-central-1.amazonaws.com/{uuid_val}/{uuid_val}.html"
