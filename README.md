@@ -11,6 +11,7 @@
 * maks emails as read.
 
 [x] mark html files as text
+[] image permissions S3
 [] connect supabase api to frontend
 [] create categories db
 
