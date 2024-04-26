@@ -6,9 +6,11 @@
 * updates Supabase database.
 * renames HTML file with UUID+.html.
 * uploads to S3 bucket.
-* takes screenshots of the email.
-* updates Supabase db with S3 Objects url.
+* takes screenshots of the email using playwright.
+* updates Supabase db with S3 Objects' url.
 * maks emails as read.
+* deletes local HTML's.
+* deletes local images.
 
 [x] mark html files as text
 [] image permissions S3
