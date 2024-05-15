@@ -18,26 +18,28 @@ import playwright
 from playwright.async_api import async_playwright
 from PIL import Image
 
-# Configure logging
+# Lets roll some code!
+
+# Logging
 LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
 logging.basicConfig(level=LOG_LEVEL)
 logger = logging.getLogger(__name__)
 
-# Supabase client
+# Supabase client env
 SUPABASE_URL = os.getenv('SUPABASE_URL')
 SUPABASE_KEY = os.getenv('SUPABASE_KEY')
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# S3 credentials
+# S3 credentials env
 AWS_ACCESS_KEY_ID = os.getenv('AWS_ACCESS_KEY_ID')
 AWS_SECRET_ACCESS_KEY = os.getenv('AWS_SECRET_ACCESS_KEY')
 S3_BUCKET = os.getenv('AWS_S3_BUCKET_NAME')
 
-# Email credentials
+# Email credentials env
 EMAIL_USER = os.getenv('EMAIL_USER')
 EMAIL_PASS = os.getenv('EMAIL_PASS')
 
-# Path to Chrome executable
+# Path to Chrome executable -- To Dockerize
 CHROME_EXECUTABLE_PATH = "C:\\Users\\Usuario\\Documents\\GitHub\\chrome-driver\\chrome.exe"
 
 # Connect to IMAP server
@@ -73,7 +75,7 @@ async def take_screenshot(html_content, uuid_val):
         page = await browser.new_page()
 
         try:
-            # Set the viewport size to capture full height
+            # Set the viewport size to capture full email height
             await page.evaluate('''() => {
                 const body = document.querySelector('body');
                 const height = Math.max(body.scrollHeight, body.offsetHeight, body.clientHeight);
@@ -92,7 +94,7 @@ async def take_screenshot(html_content, uuid_val):
             # Set viewport width to 680px for full-page screenshot
             await page.set_viewport_size({"width": 680, "height": page.viewport_size["height"]})
 
-            # Take a full-page screenshot
+            # Take a full-page screenshot of email
             full_screenshot_path = f"{uuid_val}_full.png"
             await page.screenshot(path=full_screenshot_path, full_page=True)
             logger.info(f"Full-page screenshot saved: {full_screenshot_path}")
@@ -121,6 +123,8 @@ async def take_screenshot(html_content, uuid_val):
             if browser:
                 await browser.close()
 
+# Convert image to webp by saving as png and deleteing afterwards (avoids bug)
+
 async def convert_to_webp(image_path):
     try:
         # Open the PNG image
@@ -130,13 +134,15 @@ async def convert_to_webp(image_path):
             img.save(webp_path, "webp")
             logger.info(f"Image converted to WebP: {webp_path}")
 
-            # Remove local PNG file after conversion
+            # Delete local PNG file after conversion
         os.remove(image_path)
         logger.info(f"Local PNG file deleted after conversion: {image_path}")
 
     except Exception as e:
         logger.error(f"Error converting image to WebP: {e}")
         traceback.print_exc()
+
+# Upload images to S3 Bucket
 
 async def upload_to_s3(image_path, uuid_val):
     try:
@@ -205,25 +211,25 @@ async def main():
                     # Decode sender's name and email address
                     sender_email = decode_sender(email_msg['From'])
 
-                    # Extract sender's name from decoded sender
+                    # Extract sender's name from decoded sender - Getting company name.
                     sender_name = sender_email.split('<')[0].strip().replace('"', '')
 
                     # Extract HTML content from email
                     html_content = get_email_html(email_msg)
                     if html_content:
-                        # Generate UUID for the current processing
+                        # Generate UUID for the current processing (ver4)
                         uuid_val = str(uuid.uuid4())
 
-                        # Fill Supabase table with email details (only insert once per email)
+                        # Fill Supabase table with email details once per email
                         real_title = ''.join(ch for ch in subject_decoded if ch.isalnum() or ch.isspace())
                         created_at = datetime.now().isoformat()
                         supabase.table("TableN1").insert({
                             "subject": subject_decoded,  # Use decoded subject
                             "sender": sender_email,  # Use decoded sender email
-                            "company": sender_name,  # Insert cleaned sender's name into 'company' column
+                            "company": sender_name,  # Insert cleaned sender's name into 'company' column - used for indexing companies in Supabase trigger
                             "created_at": created_at,
                             "real_title": real_title,
-                            "uuid_script": uuid_val,  # Insert UUID into 'uuid_script' column
+                            "uuid_script": uuid_val,  # Insert UUID into 'uuid_script' column - used for url later
                             "date_processed": created_at  # Insert the date and time of processing
                         }).execute()
 
@@ -232,13 +238,13 @@ async def main():
                         with open(html_file_path, 'w', encoding='utf-8') as file:
                             file.write(html_content)
 
-                        # Upload HTML file to S3 with correct content type
+                        # Upload HTML file to S3 with correct content type to avoid S3 error
                         s3 = boto3.client('s3', 
                                           aws_access_key_id=AWS_ACCESS_KEY_ID,
                                           aws_secret_access_key=AWS_SECRET_ACCESS_KEY)
                         s3.put_object(Body=html_content.encode(), Bucket=S3_BUCKET, Key=f"{uuid_val}/{uuid_val}.html", ContentType='text/html')
 
-                        # After uploading HTML file to S3
+                        # After uploading HTML file to S3 - creating link for content & internal linking
                         html_s3_link = f"https://nlmr1.s3.eu-central-1.amazonaws.com/{uuid_val}/{uuid_val}.html"
 
                         # Update Supabase table with S3 link to HTML file
@@ -246,13 +252,13 @@ async def main():
                             "S3link_html": html_s3_link
                         }).eq("uuid_script", uuid_val).execute()
 
-                        # Generate URL for small webp image
+                        # Generate URL for small webp image creating link for content & internal linking
                         small_webp_url = f"https://nlmr1.s3.eu-central-1.amazonaws.com/{uuid_val}/{uuid_val}_small.webp"
 
-                        # Generate URL for full webp image
+                        # Generate URL for full webp image creating link for content & internal linking
                         full_webp_url = f"https://nlmr1.s3.eu-central-1.amazonaws.com/{uuid_val}/{uuid_val}_full.webp"
 
-                        # Insert URLs into Supabase
+                        # Insert URLs into Supabase for further referencing
                         supabase.table("TableN1").update({
                             "small_url_Webp": small_webp_url,
                             "full_url_Webp": full_webp_url
@@ -261,7 +267,7 @@ async def main():
                         # Take screenshots and upload them to S3
                         await take_screenshot(html_content, uuid_val)
 
-                        # Delete the local HTML file
+                        # Delete the local HTML file - not working!!
                         os.remove(html_file_path)
                         logger.info(f"Local HTML file deleted after uploading to S3: {html_file_path}")
                     else:
