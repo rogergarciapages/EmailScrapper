@@ -20,6 +20,7 @@ from dotenv import load_dotenv
 from sqlalchemy import create_engine, Column, String, Integer, DateTime, func, Text
 from sqlalchemy.orm import declarative_base, sessionmaker
 from sqlalchemy.dialects.postgresql import UUID as SQLAUUID
+import time
 
 # Load environment variables from .env file
 load_dotenv()
@@ -79,15 +80,19 @@ class Newsletter(Base):
 Base.metadata.create_all(bind=engine)
 
 # Connect to IMAP server
-def connect_to_imap():
-    try:
-        mail = imaplib.IMAP4_SSL("mail.newslettermonster.com", 993)
-        mail.login(EMAIL_USER, EMAIL_PASS)
-        return mail
-    except imaplib.IMAP4.error as e:
-        logger.error(f"IMAP connection error: {e}")
-        traceback.print_exc()
-        return None
+def connect_to_imap(retry_count=5):
+    for attempt in range(retry_count):
+        try:
+            mail = imaplib.IMAP4_SSL("mail.newslettermonster.com", 993)
+            mail.login(EMAIL_USER, EMAIL_PASS)
+            return mail
+        except imaplib.IMAP4.abort as e:
+            logger.error(f"IMAP connection error: {e}")
+            traceback.print_exc()
+            if attempt < retry_count - 1:
+                time.sleep(5)  # Wait for 5 seconds before retrying
+            else:
+                return None
 
 def get_master_user_id():
     db = SessionLocal()
@@ -218,6 +223,13 @@ async def upload_html_and_take_screenshot(html_content, uuid_val):
 
     return html_s3_link
 
+# Function to parse date and time from email
+def parse_email_date(email_date_str):
+    try:
+        return datetime.strptime(email_date_str, '%a, %d %b %Y %H:%M:%S %z')  # With timezone
+    except ValueError:
+        return datetime.strptime(email_date_str, '%a, %d %b %Y %H:%M:%S')  # Without timezone
+
 # Main function
 async def main():
     while True:
@@ -247,18 +259,22 @@ async def main():
                         # Upload HTML and take screenshot
                         html_s3_link = await upload_html_and_take_screenshot(html_content, uuid_val)
 
+                        # Retrieve the sending date of the email
+                        email_date_str = email_msg['Date']
+                        email_date = parse_email_date(email_date_str)
+
                         # Insert newsletter data into the database
                         db = SessionLocal()
                         newsletter = Newsletter(
                             user_id=master_user_id,  # Setting user_id to master_user_id if not provided
                             sender=sender_name,
-                            date=datetime.now(),
+                            date=email_date,
                             html_file_url=html_s3_link,
                             full_screenshot_url=f"https://{S3_BUCKET}.s3.{S3_REGION}.amazonaws.com/{uuid_val}/{uuid_val}_full.webp",
                             top_screenshot_url=f"https://{S3_BUCKET}.s3.{S3_REGION}.amazonaws.com/{uuid_val}/{uuid_val}_small.webp",
                             likes_count=0,
                             youRocks_count=0,
-                            created_at=datetime.now()
+                            created_at=email_date  # Set created_at to the sending date of the email
                         )
                         db.add(newsletter)
                         db.commit()
