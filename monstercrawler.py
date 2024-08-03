@@ -63,6 +63,7 @@ class User(Base):
     profile_photo = Column(Text, nullable=True)
     password = Column(Text, nullable=False)
     created_at = Column(DateTime, default=func.now())
+    role = Column(String, nullable=False)  # Ensure role is required
 
 class Newsletter(Base):
     __tablename__ = 'Newsletter'
@@ -74,7 +75,7 @@ class Newsletter(Base):
     full_screenshot_url = Column(Text)
     top_screenshot_url = Column(Text)
     likes_count = Column(Integer, default=0)
-    youRocks_count = Column(Integer, default=0, name="youRocks_count")
+    you_rocks_count = Column(Integer, default=0)  # Corrected field name
     created_at = Column(DateTime, default=func.now())
 
 Base.metadata.create_all(bind=engine)
@@ -273,7 +274,7 @@ async def main():
                             full_screenshot_url=f"https://{S3_BUCKET}.s3.{S3_REGION}.amazonaws.com/{uuid_val}/{uuid_val}_full.webp",
                             top_screenshot_url=f"https://{S3_BUCKET}.s3.{S3_REGION}.amazonaws.com/{uuid_val}/{uuid_val}_small.webp",
                             likes_count=0,
-                            youRocks_count=0,
+                            you_rocks_count=0,
                             created_at=email_date  # Set created_at to the sending date of the email
                         )
                         db.add(newsletter)
