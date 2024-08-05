@@ -20,6 +20,7 @@ from dotenv import load_dotenv
 from sqlalchemy import create_engine, Column, String, Integer, DateTime, func, Text
 from sqlalchemy.orm import declarative_base, sessionmaker
 from sqlalchemy.dialects.postgresql import UUID as SQLAUUID
+from dateutil import parser as dateutil_parser
 import time
 
 # Load environment variables from .env file
@@ -227,9 +228,12 @@ async def upload_html_and_take_screenshot(html_content, uuid_val):
 # Function to parse date and time from email
 def parse_email_date(email_date_str):
     try:
-        return datetime.strptime(email_date_str, '%a, %d %b %Y %H:%M:%S %z')  # With timezone
-    except ValueError:
-        return datetime.strptime(email_date_str, '%a, %d %b %Y %H:%M:%S')  # Without timezone
+        # This will automatically handle various date formats and time zones
+        return dateutil_parser.parse(email_date_str)
+    except ValueError as e:
+        logger.error(f"Error parsing date: {e}")
+        # Handle the error or return a default value
+        return None
 
 # Main function
 async def main():
