@@ -40,7 +40,7 @@ supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 AWS_ACCESS_KEY_ID = os.getenv('AWS_ACCESS_KEY_ID')
 AWS_SECRET_ACCESS_KEY = os.getenv('AWS_SECRET_ACCESS_KEY')
 S3_BUCKET = os.getenv('AWS_S3_BUCKET_NAME')
-S3_REGION = os.getenv('AWS_REGION', 'eu-central-1')  # Default to 'eu-central-1' if not set
+S3_REGION = os.getenv('AWS_REGION', 'eu-central-1')
 
 # Email credentials env
 EMAIL_USER = os.getenv('EMAIL_USER')
@@ -64,7 +64,7 @@ class User(Base):
     profile_photo = Column(Text, nullable=True)
     password = Column(Text, nullable=False)
     created_at = Column(DateTime, default=func.now())
-    role = Column(String, nullable=False)  # Ensure role is required
+    role = Column(String, nullable=False)
 
 class Newsletter(Base):
     __tablename__ = 'Newsletter'
@@ -72,11 +72,12 @@ class Newsletter(Base):
     user_id = Column(SQLAUUID(as_uuid=True), index=True, nullable=False)
     sender = Column(String, index=True)
     date = Column(DateTime, default=func.now())
+    subject = Column(String)  # Add this line
     html_file_url = Column(Text)
     full_screenshot_url = Column(Text)
     top_screenshot_url = Column(Text)
     likes_count = Column(Integer, default=0)
-    you_rocks_count = Column(Integer, default=0)  # Corrected field name
+    you_rocks_count = Column(Integer, default=0)
     created_at = Column(DateTime, default=func.now())
 
 Base.metadata.create_all(bind=engine)
@@ -274,6 +275,7 @@ async def main():
                             user_id=master_user_id,  # Setting user_id to master_user_id if not provided
                             sender=sender_name,
                             date=email_date,
+                            subject=subject_decoded,  # Add this line
                             html_file_url=html_s3_link,
                             full_screenshot_url=f"https://{S3_BUCKET}.s3.{S3_REGION}.amazonaws.com/{uuid_val}/{uuid_val}_full.webp",
                             top_screenshot_url=f"https://{S3_BUCKET}.s3.{S3_REGION}.amazonaws.com/{uuid_val}/{uuid_val}_small.webp",
