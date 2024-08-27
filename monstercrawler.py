@@ -1,7 +1,5 @@
 import os
 import re
-import binascii
-import base64
 import logging
 import traceback
 import asyncio
@@ -12,15 +10,16 @@ from email.errors import HeaderParseError
 from datetime import datetime
 import uuid
 import boto3
+import json
 from supabase import create_client
 from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright
 from PIL import Image
 from dotenv import load_dotenv
-from sqlalchemy import create_engine, Column, String, Integer, DateTime, func, Text
-from sqlalchemy.orm import declarative_base, sessionmaker
-from sqlalchemy.dialects.postgresql import UUID as SQLAUUID
+from sqlalchemy import create_engine, text
+from sqlalchemy.orm import sessionmaker
 from dateutil import parser as dateutil_parser
+import google.generativeai as genai
 import time
 
 # Load environment variables from .env file
@@ -46,41 +45,15 @@ S3_REGION = os.getenv('AWS_REGION', 'eu-central-1')
 EMAIL_USER = os.getenv('EMAIL_USER')
 EMAIL_PASS = os.getenv('EMAIL_PASS')
 
+# AI API key for Google Bard (Gemini)
+BARD_API_KEY = os.getenv('BARD_API_KEY')
+
 # Database connection
 DATABASE_URL = os.getenv('DATABASE_URL')
 if not DATABASE_URL:
     raise ValueError("DATABASE_URL is not set. Check your .env file and ensure the environment variable is set.")
 engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-Base = declarative_base()
-
-# Define the models
-class User(Base):
-    __tablename__ = 'User'
-    user_id = Column(SQLAUUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    name = Column(String, unique=True, nullable=True)
-    username = Column(String, unique=True, nullable=True)
-    email = Column(String, unique=True, nullable=False)
-    profile_photo = Column(Text, nullable=True)
-    password = Column(Text, nullable=False)
-    created_at = Column(DateTime, default=func.now())
-    role = Column(String, nullable=False)
-
-class Newsletter(Base):
-    __tablename__ = 'Newsletter'
-    newsletter_id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(SQLAUUID(as_uuid=True), index=True, nullable=False)
-    sender = Column(String, index=True)
-    date = Column(DateTime, default=func.now())
-    subject = Column(String)  # Add this line
-    html_file_url = Column(Text)
-    full_screenshot_url = Column(Text)
-    top_screenshot_url = Column(Text)
-    likes_count = Column(Integer, default=0)
-    you_rocks_count = Column(Integer, default=0)
-    created_at = Column(DateTime, default=func.now())
-
-Base.metadata.create_all(bind=engine)
 
 # Connect to IMAP server
 def connect_to_imap(retry_count=5):
@@ -98,11 +71,11 @@ def connect_to_imap(retry_count=5):
                 return None
 
 def get_master_user_id():
-    db = SessionLocal()
-    master_user = db.query(User).filter(User.username == 'themonster').first()
-    db.close()
-    if master_user:
-        return master_user.user_id
+    conn = engine.connect()
+    result = conn.execute(text("SELECT user_id FROM \"User\" WHERE username = 'themonster'")).fetchone()
+    conn.close()
+    if result:
+        return result[0]
     raise ValueError("Master user 'The Monster' not found. Please ensure the master user exists in the database.")
 
 # Get HTML content from email message
@@ -114,6 +87,16 @@ def get_email_html(email_msg):
             html = part.get_payload(decode=True).decode(charset)
             break
     return html
+
+# Decode Unicode escape sequences
+def decode_unicode_escape_sequences(text):
+    return text.encode('utf-8').decode('unicode-escape')
+
+# Extract text from HTML content
+def extract_text_from_html(html_content):
+    soup = BeautifulSoup(html_content, "html.parser")
+    text = soup.get_text(separator="\n", strip=True)
+    return decode_unicode_escape_sequences(text)
 
 # Convert image to webp and delete original png
 async def convert_to_webp(image_path):
@@ -236,6 +219,68 @@ def parse_email_date(email_date_str):
         # Handle the error or return a default value
         return None
 
+# Generate summary, tags, and products link using Google Bard API
+def generate_summary_and_tags(email_subject, email_content):
+    genai.configure(api_key=BARD_API_KEY)
+    model = genai.GenerativeModel('gemini-1.5-flash')
+
+    text_content = extract_text_from_html(email_content)
+
+    prompt = f"""
+Subject: {email_subject}
+
+Email Content:
+{text_content}
+
+Task:
+Mimic the tone and style of the newsletter sender to craft a compelling summary, extract relevant tags, and provide a product link. Ensure the summary feels like it came directly from the sender and make sure no weird strings of text, symbols, or characters are added.
+
+1. Provide a concise, compelling summary of the newsletter content and what it promotes in the sender's voice. Ensure no slashes, backslashes, or asterisks are included in the summary.
+2. Extract relevant subjects from the content of the email, convert them into tags and remove any spaces between words if tags have two or more words. Use camelCase without hyphens, dots, or underscores. Provide tags as comma-separated values.
+3. Provide the most relevant link to any product, post, or website mentioned in the newsletter in URL format only. If no relevant link is found, provide the URL for the homepage of the business, product, or service. Ensure the URL starts with https:// and is valid. Remove any text before or after the URL and avoid annotations.
+
+Output format:
+Summary: <extracted_summary>
+Tags: <extracted_tags>
+Products Link: <extracted_products_link>
+"""
+
+    try:
+        response = model.generate_content(prompt)
+        raw_text = response.text
+
+        # Enhanced parsing logic
+        summary_match = re.search(r"Summary:\s*(.*?)(Tags:|$)", raw_text, re.DOTALL)
+        tags_match = re.search(r"Tags:\s*(.*?)(Products Link:|$)", raw_text, re.DOTALL)
+        products_link_match = re.search(r"Products Link:\s*(.*?)([`\n]|$)", raw_text, re.DOTALL)
+
+        summary = summary_match.group(1).strip() if summary_match else None
+        tags = tags_match.group(1).strip().split(',') if tags_match and tags_match.group(1).strip() else []
+        products_link = products_link_match.group(1).strip() if products_link_match else None
+
+        return {
+            "summary": summary,
+            "tags": tags,
+            "products_link": products_link
+        }
+    except Exception as e:
+        logger.error(f"Error calling AI API: {e}")
+        raise
+
+# Insert tags into the database and return their IDs
+def get_or_create_tags(conn, tags):
+    tag_ids = []
+    for tag in tags:
+        tag = tag.strip()  # Strip whitespace and ensure the tag is clean
+        result = conn.execute(text("SELECT id FROM \"Tag\" WHERE name = :name"), {"name": tag}).fetchone()
+        if result:
+            tag_ids.append(result[0])
+        else:
+            result = conn.execute(text("INSERT INTO \"Tag\" (name) VALUES (:name) RETURNING id"), {"name": tag})
+            tag_id = result.fetchone()[0]
+            tag_ids.append(tag_id)
+    return tag_ids
+
 # Main function
 async def main():
     while True:
@@ -262,6 +307,19 @@ async def main():
                     if html_content:
                         uuid_val = str(uuid.uuid4())
 
+                        # Generate summary and tags using AI API
+                        try:
+                            ai_response = generate_summary_and_tags(subject_decoded, html_content)
+                            logger.info(f"AI API Response: {json.dumps(ai_response, indent=2)}")
+                            summary = ai_response.get("summary")
+                            tags = [tag.strip() for tag in ai_response.get("tags")]  # Ensure tags are trimmed
+                            products_link = ai_response.get("products_link")
+                        except Exception as e:
+                            logger.error(f"Error calling AI API: {e}")
+                            summary = None
+                            tags = []
+                            products_link = None
+
                         # Upload HTML and take screenshot
                         html_s3_link = await upload_html_and_take_screenshot(html_content, uuid_val)
 
@@ -269,23 +327,57 @@ async def main():
                         email_date_str = email_msg['Date']
                         email_date = parse_email_date(email_date_str)
 
-                        # Insert newsletter data into the database
-                        db = SessionLocal()
-                        newsletter = Newsletter(
-                            user_id=master_user_id,  # Setting user_id to master_user_id if not provided
-                            sender=sender_name,
-                            date=email_date,
-                            subject=subject_decoded,  # Add this line
-                            html_file_url=html_s3_link,
-                            full_screenshot_url=f"https://{S3_BUCKET}.s3.{S3_REGION}.amazonaws.com/{uuid_val}/{uuid_val}_full.webp",
-                            top_screenshot_url=f"https://{S3_BUCKET}.s3.{S3_REGION}.amazonaws.com/{uuid_val}/{uuid_val}_small.webp",
-                            likes_count=0,
-                            you_rocks_count=0,
-                            created_at=email_date  # Set created_at to the sending date of the email
-                        )
-                        db.add(newsletter)
-                        db.commit()
-                        db.close()
+                        conn = engine.connect()
+                        trans = conn.begin()  # Explicitly begin a transaction
+
+                        try:
+                            # Insert newsletter data into the database
+                            query = text(f"""
+                            INSERT INTO "Newsletter" (user_id, sender, date, subject, html_file_url, full_screenshot_url, top_screenshot_url, likes_count, you_rocks_count, created_at, summary, tags, products_link) 
+                            VALUES (:user_id, :sender, :date, :subject, :html_file_url, 
+                            :full_screenshot_url, :top_screenshot_url, 
+                            0, 0, :created_at, :summary, :tags, :products_link)
+                            RETURNING newsletter_id
+                            """)
+                            params = {
+                                'user_id': master_user_id,
+                                'sender': sender_name,
+                                'date': email_date,
+                                'subject': subject_decoded,
+                                'html_file_url': html_s3_link,
+                                'full_screenshot_url': f'https://{S3_BUCKET}.s3.{S3_REGION}.amazonaws.com/{uuid_val}/{uuid_val}_full.webp',
+                                'top_screenshot_url': f'https://{S3_BUCKET}.s3.{S3_REGION}.amazonaws.com/{uuid_val}/{uuid_val}_small.webp',
+                                'created_at': email_date,
+                                'summary': summary,
+                                'tags': json.dumps(tags),  # Store tags as JSON string
+                                'products_link': products_link
+                            }
+                            
+                            logger.info(f"Executing query: {query}")
+                            logger.info(f"With parameters: {params}")
+
+                            result = conn.execute(query, params)
+                            newsletter_id = result.fetchone()[0]
+
+                            # Insert tags and their relationships into the database
+                            tag_ids = get_or_create_tags(conn, tags)
+                            for tag_id in tag_ids:
+                                conn.execute(text("INSERT INTO \"NewsletterTag\" (newsletter_id, tag_id) VALUES (:newsletter_id, :tag_id)"),
+                                             {"newsletter_id": newsletter_id, "tag_id": tag_id})
+
+                            trans.commit()  # Explicitly commit the transaction
+                            logger.info(f"Insert result: {result}")
+
+                        except Exception as e:
+                            trans.rollback()
+                            logger.error(f"Error processing transaction: {e}")
+                            traceback.print_exc()
+
+                        finally:
+                            conn.close()
+
+                        # Mark the email as read
+                        mail.store(msg_id, '+FLAGS', '\\Seen')
                     else:
                         logger.warning("No HTML content found in the email.")
             else:
