@@ -25,10 +25,13 @@ LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
 logging.basicConfig(level=LOG_LEVEL)
 logger = logging.getLogger(__name__)
 
+
 # Supabase client env
 SUPABASE_URL = os.getenv('SUPABASE_URL')
 SUPABASE_KEY = os.getenv('SUPABASE_KEY')
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+logger.info(f"Initializing Supabase client with URL: {SUPABASE_URL}")
+
 
 # S3 credentials env
 AWS_ACCESS_KEY_ID = os.getenv('AWS_ACCESS_KEY_ID')
@@ -55,6 +58,9 @@ def connect_to_imap():
         logger.error(f"IMAP connection error: {e}")
         traceback.print_exc()
         return None
+
+logger.info(f"Connecting to IMAP server at: mail.newslettermonster.com")
+
 
 # Get HTML content from email message
 def get_email_html(email_msg):
