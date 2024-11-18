@@ -12,7 +12,7 @@
 * deletes local HTML's.
 * deletes local images.
 
-[x] mark html files as text
+[x] mark html files as text <br />
 [X] image permissions S3
 [X] connect supabase api to frontend
 [X] create tags db
