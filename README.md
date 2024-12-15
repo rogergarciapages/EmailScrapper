@@ -12,10 +12,11 @@
 * deletes local HTML's.
 * deletes local images.
 
-[x] mark html files as text
-[] image permissions S3
-[] connect supabase api to frontend
-[] create categories db
+[x] mark html files as text <br />
+[X] image permissions S3 <br />
+[X] connect supabase api to frontend <br />
+[X] create tags db <br />
+[X] assign summary & tags through Gemini API and save to db <br />
 
 Using these libraries: Playwright, Beautifulsoup, PIL, imaplib, boto, s3, supabase (among others)
 
