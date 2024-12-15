@@ -11,7 +11,6 @@ from datetime import datetime
 import uuid
 import boto3
 import json
-from supabase import create_client
 from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright
 from PIL import Image
@@ -21,6 +20,9 @@ from sqlalchemy.orm import sessionmaker
 from dateutil import parser as dateutil_parser
 import google.generativeai as genai
 import time
+import psycopg2
+from psycopg2.extras import DictCursor
+from urllib.parse import urlparse
 
 # Load environment variables from .env file
 load_dotenv()
@@ -30,10 +32,30 @@ LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
 logging.basicConfig(level=LOG_LEVEL)
 logger = logging.getLogger(__name__)
 
-# Supabase client env
-SUPABASE_URL = os.getenv('SUPABASE_URL')
-SUPABASE_KEY = os.getenv('SUPABASE_KEY')
-supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+# Postgres client env
+def get_db_config():
+    db_url = os.getenv('DIRECT_DATABASE_URL')
+    if not db_url:
+        raise ValueError("DIRECT_DATABASE_URL is not set in environment variables")
+    
+    parsed = urlparse(db_url)
+    return {
+        'dbname': parsed.path[1:],
+        'user': parsed.username,
+        'password': parsed.password,
+        'host': parsed.hostname,
+        'port': parsed.port
+    }
+
+def get_db_connection():
+    try:
+        db_config = get_db_config()
+        conn = psycopg2.connect(**db_config)
+        conn.autocommit = False
+        return conn
+    except Exception as e:
+        logger.error(f"Error connecting to database: {e}")
+        raise
 
 # S3 credentials env
 AWS_ACCESS_KEY_ID = os.getenv('AWS_ACCESS_KEY_ID')
@@ -71,12 +93,13 @@ def connect_to_imap(retry_count=5):
                 return None
 
 def get_master_user_id():
-    conn = engine.connect()
-    result = conn.execute(text("SELECT user_id FROM \"User\" WHERE username = 'themonster'")).fetchone()
-    conn.close()
-    if result:
-        return result[0]
-    raise ValueError("Master user 'The Monster' not found. Please ensure the master user exists in the database.")
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute('SELECT user_id FROM "User" WHERE username = %s', ('themonster',))
+            result = cur.fetchone()
+            if result:
+                return result[0]
+    raise ValueError("Master user 'The Monster' not found")
 
 # Get HTML content from email message
 def get_email_html(email_msg):
@@ -279,66 +302,47 @@ def create_tag_slug(tag_name: str) -> str:
     slug = slug.strip('-')
     return slug
 
-def get_unique_slug(conn, base_slug: str) -> str:
+def get_unique_slug(cur, base_slug: str) -> str:
     """Get a unique slug, adding numbers if necessary."""
     slug = base_slug
     counter = 1
     while True:
-        # Check if slug exists
-        result = conn.execute(
-            text("SELECT id FROM \"Tag\" WHERE slug = :slug"),
-            {"slug": slug}
-        ).fetchone()
-        
-        if not result:
+        cur.execute('SELECT id FROM "Tag" WHERE slug = %s', (slug,))
+        if not cur.fetchone():
             return slug
-        
-        # If exists, append counter
         slug = f"{base_slug}-{counter}"
         counter += 1
 
-def get_or_create_tags(conn, tags):
+def get_or_create_tags(tags, conn, cur):
     """Get or create tags with proper slug handling."""
     tag_ids = []
     for tag_name in tags:
-        tag_name = tag_name.strip()  # Clean the tag name
-        if not tag_name:  # Skip empty tags
+        tag_name = tag_name.strip()
+        if not tag_name:
             continue
 
-        # First try to find the tag by name (case insensitive)
-        result = conn.execute(
-            text("SELECT id, name, slug FROM \"Tag\" WHERE LOWER(name) = LOWER(:name)"),
-            {"name": tag_name}
-        ).fetchone()
+        # Try to find existing tag
+        cur.execute(
+            'SELECT id, name, slug FROM "Tag" WHERE LOWER(name) = LOWER(%s)',
+            (tag_name,)
+        )
+        result = cur.fetchone()
 
         if result:
-            # Tag exists, use existing ID
             tag_ids.append(result[0])
         else:
-            # Create new tag with proper slug
+            # Create new tag
             base_slug = create_tag_slug(tag_name)
-            unique_slug = get_unique_slug(conn, base_slug)
+            unique_slug = get_unique_slug(cur, base_slug)
             
-            try:
-                result = conn.execute(
-                    text("""
-                    INSERT INTO "Tag" (name, slug, count, "createdAt", "updatedAt")
-                    VALUES (:name, :slug, :count, NOW(), NOW())
-                    RETURNING id
-                    """),
-                    {
-                        "name": tag_name,
-                        "slug": unique_slug,
-                        "count": 0  # Initial count
-                    }
-                )
-                tag_id = result.fetchone()[0]
-                tag_ids.append(tag_id)
-                logger.info(f"Created new tag: {tag_name} with slug: {unique_slug}")
-            except Exception as e:
-                logger.error(f"Error creating tag {tag_name}: {e}")
-                continue
-
+            cur.execute(
+                '''INSERT INTO "Tag" (name, slug, count, "createdAt", "updatedAt")
+                   VALUES (%s, %s, %s, NOW(), NOW()) RETURNING id''',
+                (tag_name, unique_slug, 0)
+            )
+            tag_id = cur.fetchone()[0]
+            tag_ids.append(tag_id)
+            
     return tag_ids
 
 # Main function
@@ -346,132 +350,140 @@ async def main():
     while True:
         mail = connect_to_imap()
         if not mail:
-            logger.error("Failed to connect to IMAP server. Exiting.")
-            return
-
-        master_user_id = get_master_user_id()
+            logger.error("Failed to connect to IMAP server. Retrying in 60 seconds...")
+            await asyncio.sleep(60)
+            continue
 
         try:
-            mail.select('INBOX')
-            _, msg_ids = mail.search(None, 'UNSEEN')
-            if msg_ids:
-                for msg_id in msg_ids[0].split():
-                    _, msg_data = mail.fetch(msg_id, '(RFC822)')
-                    email_msg = email.message_from_bytes(msg_data[0][1])
+            with get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    master_user_id = get_master_user_id()
 
-                    subject_decoded = decode_subject(email_msg['Subject'])
-                    sender_email = decode_sender(email_msg['From'])
-                    sender_name = sender_email.split('<')[0].strip().replace('"', '')
+                    mail.select('INBOX')
+                    _, msg_ids = mail.search(None, 'UNSEEN')
+                    
+                    if msg_ids and msg_ids[0]:
+                        for msg_id in msg_ids[0].split():
+                            try:
+                                _, msg_data = mail.fetch(msg_id, '(RFC822)')
+                                email_msg = email.message_from_bytes(msg_data[0][1])
 
-                    html_content = get_email_html(email_msg)
-                    if html_content:
-                        uuid_val = str(uuid.uuid4())
+                                subject_decoded = decode_subject(email_msg['Subject'])
+                                sender_email = decode_sender(email_msg['From'])
+                                sender_name = sender_email.split('<')[0].strip().replace('"', '')
 
-                        # Generate summary and tags using AI API
-                        try:
-                            ai_response = generate_summary_and_tags(subject_decoded, html_content)
-                            logger.info(f"AI API Response: {json.dumps(ai_response, indent=2)}")
-                            summary = ai_response.get("summary")
-                            tags = [tag.strip() for tag in ai_response.get("tags")]  # Ensure tags are trimmed
-                            products_link = ai_response.get("products_link")
-                        except Exception as e:
-                            logger.error(f"Error calling AI API: {e}")
-                            summary = None
-                            tags = []
-                            products_link = None
+                                html_content = get_email_html(email_msg)
+                                if not html_content:
+                                    logger.warning(f"No HTML content found in email: {subject_decoded}")
+                                    continue
 
-                        # Upload HTML and take screenshot
-                        html_s3_link = await upload_html_and_take_screenshot(html_content, uuid_val)
+                                uuid_val = str(uuid.uuid4())
 
-                        # Retrieve the sending date of the email
-                        email_date_str = email_msg['Date']
-                        email_date = parse_email_date(email_date_str)
+                                # Generate summary and tags using AI API
+                                try:
+                                    ai_response = generate_summary_and_tags(subject_decoded, html_content)
+                                    logger.info(f"AI API Response: {json.dumps(ai_response, indent=2)}")
+                                    summary = ai_response.get("summary")
+                                    tags = [tag.strip() for tag in ai_response.get("tags", [])]
+                                    products_link = ai_response.get("products_link")
+                                except Exception as e:
+                                    logger.error(f"Error calling AI API: {e}")
+                                    summary = None
+                                    tags = []
+                                    products_link = None
 
-                        conn = engine.connect()
-                        trans = conn.begin()  # Explicitly begin a transaction
+                                # Upload HTML and take screenshots
+                                try:
+                                    html_s3_link = await upload_html_and_take_screenshot(html_content, uuid_val)
+                                    # Define S3 URLs for screenshots
+                                    full_screenshot_url = f'https://{S3_BUCKET}.s3.{S3_REGION}.amazonaws.com/{uuid_val}/{uuid_val}_full.webp'
+                                    top_screenshot_url = f'https://{S3_BUCKET}.s3.{S3_REGION}.amazonaws.com/{uuid_val}/{uuid_val}_small.webp'
+                                except Exception as e:
+                                    logger.error(f"Error processing screenshots: {e}")
+                                    continue
 
-                        try:
-                            # Insert newsletter data into the database
-                            query = text("""
-                            INSERT INTO "Newsletter" (
-                                user_id, sender, date, subject, html_file_url,
-                                full_screenshot_url, top_screenshot_url,
-                                likes_count, you_rocks_count, created_at,
-                                summary, products_link
-                            ) 
-                            VALUES (
-                                :user_id, :sender, :date, :subject, :html_file_url,
-                                :full_screenshot_url, :top_screenshot_url,
-                                0, 0, :created_at, :summary, :products_link
-                            )
-                            RETURNING newsletter_id
-                            """)
-                            
-                            params = {
-                                'user_id': master_user_id,
-                                'sender': sender_name,
-                                'date': email_date,
-                                'subject': subject_decoded,
-                                'html_file_url': html_s3_link,
-                                'full_screenshot_url': f'https://{S3_BUCKET}.s3.{S3_REGION}.amazonaws.com/{uuid_val}/{uuid_val}_full.webp',
-                                'top_screenshot_url': f'https://{S3_BUCKET}.s3.{S3_REGION}.amazonaws.com/{uuid_val}/{uuid_val}_small.webp',
-                                'created_at': email_date,
-                                'summary': summary,
-                                'products_link': products_link
-                            }
-                            
-                            result = conn.execute(query, params)
-                            newsletter_id = result.fetchone()[0]
+                                # Parse email date
+                                email_date = parse_email_date(email_msg['Date'])
+                                if not email_date:
+                                    email_date = datetime.now()
 
-                            # Create tags and relationships
-                            if tags:
-                                tag_ids = get_or_create_tags(conn, tags)
-                                for tag_id in tag_ids:
-                                    conn.execute(
-                                        text("""
-                                        INSERT INTO "NewsletterTag" (newsletter_id, tag_id)
-                                        VALUES (:newsletter_id, :tag_id)
-                                        """),
-                                        {"newsletter_id": newsletter_id, "tag_id": tag_id}
-                                    )
+                                try:
+                                    # Begin transaction
+                                    cur.execute("BEGIN")
 
-                                    # Update tag count
-                                    conn.execute(
-                                        text("""
-                                        UPDATE "Tag"
-                                        SET count = (
-                                            SELECT COUNT(*) 
-                                            FROM "NewsletterTag" 
-                                            WHERE tag_id = :tag_id
-                                        ),
-                                        "updatedAt" = NOW()
-                                        WHERE id = :tag_id
-                                        """),
-                                        {"tag_id": tag_id}
-                                    )
+                                    # Insert newsletter
+                                    cur.execute("""
+                                        INSERT INTO "Newsletter" (
+                                            user_id, sender, date, subject, html_file_url,
+                                            full_screenshot_url, top_screenshot_url,
+                                            likes_count, you_rocks_count, created_at,
+                                            summary, products_link
+                                        ) 
+                                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                                        RETURNING newsletter_id
+                                    """, (
+                                        master_user_id, sender_name, email_date, subject_decoded,
+                                        html_s3_link, full_screenshot_url, top_screenshot_url,
+                                        0, 0, email_date, summary, products_link
+                                    ))
+                                    
+                                    newsletter_id = cur.fetchone()[0]
 
-                            trans.commit()
-                            logger.info(f"Successfully processed newsletter with ID: {newsletter_id}")
+                                    # Process tags
+                                    if tags:
+                                        tag_ids = get_or_create_tags(tags, conn, cur)
+                                        for tag_id in tag_ids:
+                                            # Create newsletter-tag relationship
+                                            cur.execute("""
+                                                INSERT INTO "NewsletterTag" (newsletter_id, tag_id)
+                                                VALUES (%s, %s)
+                                            """, (newsletter_id, tag_id))
 
-                        except Exception as e:
-                            trans.rollback()
-                            logger.error(f"Error processing transaction: {e}")
-                            traceback.print_exc()
-                        finally:
-                            conn.close()
+                                            # Update tag count
+                                            cur.execute("""
+                                                UPDATE "Tag"
+                                                SET count = (
+                                                    SELECT COUNT(*) 
+                                                    FROM "NewsletterTag" 
+                                                    WHERE tag_id = %s
+                                                ),
+                                                "updatedAt" = NOW()
+                                                WHERE id = %s
+                                            """, (tag_id, tag_id))
 
-                        # Mark the email as read
-                        mail.store(msg_id, '+FLAGS', '\\Seen')
+                                    # Commit transaction
+                                    conn.commit()
+                                    logger.info(f"Successfully processed newsletter: {subject_decoded} (ID: {newsletter_id})")
+                                    logger.info(f"Successfully processed {len(tags)} tags for newsletter ID: {newsletter_id}")
+                                    logger.info(f"Screenshot URLs generated: {full_screenshot_url}")
+
+                                    # Mark email as read only after successful processing
+                                    mail.store(msg_id, '+FLAGS', '\\Seen')
+
+                                except Exception as e:
+                                    conn.rollback()
+                                    logger.error(f"Error processing newsletter {subject_decoded}: {e}")
+                                    traceback.print_exc()
+
+                            except Exception as e:
+                                logger.error(f"Error processing email message: {e}")
+                                traceback.print_exc()
+                                continue
                     else:
-                        logger.warning("No HTML content found in the email.")
-            else:
-                logger.info("No unseen messages found in the inbox.")
+                        logger.info("No unseen messages found in inbox")
+
         except Exception as e:
-            logger.error(f"Error processing emails: {e}")
+            logger.error(f"Error in main processing loop: {e}")
             traceback.print_exc()
         finally:
-            mail.logout()
-            await asyncio.sleep(60)
+            try:
+                mail.logout()
+            except Exception as e:
+                logger.error(f"Error logging out from IMAP: {e}")
+
+        # Wait before next check
+        logger.info("Waiting 60 seconds before next check...")
+        await asyncio.sleep(60)
 
 if __name__ == "__main__":
     asyncio.run(main())
