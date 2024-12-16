@@ -22,6 +22,8 @@ from psycopg2.extras import DictCursor
 from urllib.parse import urlparse
 from dateutil import parser as dateutil_parser
 from typing import Dict, List, Optional
+import anthropic
+from anthropic import Anthropic
 
 # Load environment variables
 load_dotenv()
@@ -45,6 +47,11 @@ class NewsletterProcessor:
         # Initialize Gemini
         genai.configure(api_key=BARD_API_KEY)
         self.model = genai.GenerativeModel('gemini-pro')
+        
+        # Initialize Anthropic
+        anthropic_api_key = os.getenv('ANTHROPIC_API')
+        self.anthropic = Anthropic(api_key=anthropic_api_key)
+        
         self.system_prompt = """You are an AI trained to analyze newsletters and extract key information.
 Your task is to:
 1. Identify the main topics and themes
@@ -236,11 +243,116 @@ Focus on providing accurate, concise information while preserving the newsletter
                 
         return tag_ids
 
+    async def _generate_content_with_gemini(self, text_content: str, subject: str) -> Dict:
+        """Try to generate content using Gemini API."""
+        try:
+            prompt = f"Subject: {subject}\n\nContent: {text_content}\n\n{self.system_prompt}"
+            response = await self.model.generate_content_async(prompt)
+            
+            # Parse the response into structured data
+            lines = response.text.split('\n')
+            result = {}
+            current_key = None
+            
+            for line in lines:
+                if line.startswith('Summary:'):
+                    current_key = 'summary'
+                    result[current_key] = line.replace('Summary:', '').strip()
+                elif line.startswith('Tags:'):
+                    current_key = 'tags'
+                    tags_text = line.replace('Tags:', '').strip()
+                    result[current_key] = [tag.strip() for tag in tags_text.split(',')]
+                elif line.startswith('Products:'):
+                    current_key = 'products'
+                    products_text = line.replace('Products:', '').strip()
+                    result[current_key] = [prod.strip() for prod in products_text.split(',')]
+                elif line.startswith('Key Insights:'):
+                    current_key = 'insights'
+                    result[current_key] = []
+                elif current_key == 'insights' and line.strip().startswith('-'):
+                    result[current_key].append(line.strip()[2:])
+                elif current_key and line.strip():
+                    if isinstance(result[current_key], list):
+                        result[current_key].append(line.strip())
+                    else:
+                        result[current_key] += ' ' + line.strip()
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Gemini API error: {e}")
+            return None
+
+    async def _generate_content_with_anthropic(self, text_content: str, subject: str) -> Dict:
+        """Try to generate content using Anthropic API."""
+        try:
+            prompt = f"Subject: {subject}\n\nContent: {text_content}\n\n{self.system_prompt}"
+            
+            message = await self.anthropic.messages.create(
+                model="claude-3-opus-20240229",
+                max_tokens=1000,
+                messages=[{
+                    "role": "user",
+                    "content": prompt
+                }]
+            )
+            
+            # Parse the response into structured data
+            lines = message.content[0].text.split('\n')
+            result = {}
+            current_key = None
+            
+            for line in lines:
+                if line.startswith('Summary:'):
+                    current_key = 'summary'
+                    result[current_key] = line.replace('Summary:', '').strip()
+                elif line.startswith('Tags:'):
+                    current_key = 'tags'
+                    tags_text = line.replace('Tags:', '').strip()
+                    result[current_key] = [tag.strip() for tag in tags_text.split(',')]
+                elif line.startswith('Products:'):
+                    current_key = 'products'
+                    products_text = line.replace('Products:', '').strip()
+                    result[current_key] = [prod.strip() for prod in products_text.split(',')]
+                elif line.startswith('Key Insights:'):
+                    current_key = 'insights'
+                    result[current_key] = []
+                elif current_key == 'insights' and line.strip().startswith('-'):
+                    result[current_key].append(line.strip()[2:])
+                elif current_key and line.strip():
+                    if isinstance(result[current_key], list):
+                        result[current_key].append(line.strip())
+                    else:
+                        result[current_key] += ' ' + line.strip()
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Anthropic API error: {e}")
+            return None
+
     async def process_email(self, email_content: str, subject: str) -> Dict:
         """Process raw email content and extract structured information."""
         soup = BeautifulSoup(email_content, 'html.parser')
         text_content = self._extract_text_with_structure(soup)
-        analysis = await self._generate_content(text_content, subject)
+        
+        # Try Gemini first
+        analysis = await self._generate_content_with_gemini(text_content, subject)
+        
+        # If Gemini fails, try Anthropic
+        if analysis is None:
+            logger.info("Gemini API failed, falling back to Anthropic API")
+            analysis = await self._generate_content_with_anthropic(text_content, subject)
+            
+        # If both APIs fail, return minimal structure
+        if analysis is None:
+            logger.error("Both Gemini and Anthropic APIs failed")
+            analysis = {
+                'summary': f"Failed to generate summary for: {subject}",
+                'tags': [],
+                'products': [],
+                'insights': []
+            }
         
         return {
             'content': text_content,
@@ -258,72 +370,6 @@ Focus on providing accurate, concise information while preserving the newsletter
                 element.name = tag
         
         return str(soup)
-
-    async def _generate_content(self, text: str, subject: str) -> Dict:
-        try:
-            full_prompt = f"{self.system_prompt}\n\nSubject: {subject}\n\nAnalyze this newsletter:\n{text}"
-            
-            # Add retry logic with exponential backoff
-            max_retries = 3
-            for attempt in range(max_retries):
-                try:
-                    response = await self.model.generate_content_async(full_prompt)
-                    content = response.text
-                    return self._parse_ai_response(content)
-                except Exception as e:
-                    if "429" in str(e) and attempt < max_retries - 1:
-                        wait_time = (2 ** attempt) * 5  # Exponential backoff: 5s, 10s, 20s
-                        logger.warning(f"API rate limit hit, waiting {wait_time} seconds...")
-                        await asyncio.sleep(wait_time)
-                        continue
-                    raise
-            
-            logger.error(f"Error generating content after {max_retries} attempts")
-            return {
-                "summary": "",
-                "tags": [],
-                "products": [],
-                "key_insights": []
-            }
-        except Exception as e:
-            logger.error(f"Error generating content: {str(e)}")
-            return {
-                "summary": "",
-                "tags": [],
-                "products": [],
-                "key_insights": []
-            }
-
-    def _parse_ai_response(self, response: str) -> Dict:
-        parsed_data = {
-            "summary": "",
-            "tags": [],
-            "products": [],
-            "key_insights": []
-        }
-        
-        sections = {
-            "summary": r"Summary:(.*?)(?=Tags:|$)",
-            "tags": r"Tags:(.*?)(?=Products:|$)",
-            "products": r"Products:(.*?)(?=Key Insights:|$)",
-            "key_insights": r"Key Insights:(.*?)(?=$)"
-        }
-        
-        for key, pattern in sections.items():
-            match = re.search(pattern, response, re.DOTALL)
-            if match:
-                content = match.group(1).strip()
-                if key == "tags":
-                    parsed_data[key] = [tag.strip() for tag in content.split(',') if tag.strip()]
-                elif key == "products":
-                    parsed_data[key] = [product.strip() for product in content.split(',') if product.strip()]
-                elif key == "key_insights":
-                    insights = re.split(r'\n\s*[-•]\s*|\n\s*\d+\.\s*', content)
-                    parsed_data[key] = [insight.strip() for insight in insights if insight.strip()]
-                else:
-                    parsed_data[key] = content
-        
-        return parsed_data
 
     async def process_and_save_email(self, email_msg) -> None:
         try:
