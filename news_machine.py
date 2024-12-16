@@ -52,6 +52,18 @@ class NewsletterProcessor:
         anthropic_api_key = os.getenv('ANTHROPIC_API')
         self.anthropic = Anthropic(api_key=anthropic_api_key)
         
+        # Rate limiting setup
+        self.last_gemini_call = 0
+        self.last_anthropic_call = 0
+        self.gemini_calls = 0
+        self.anthropic_calls = 0
+        self.reset_time = time.time()
+        
+        # Rate limits (adjust these based on your API quotas)
+        self.GEMINI_CALLS_PER_MINUTE = 50
+        self.ANTHROPIC_CALLS_PER_MINUTE = 15
+        self.MIN_DELAY_BETWEEN_CALLS = 1  # seconds
+        
         self.system_prompt = """You are an AI trained to analyze newsletters and extract key information.
 Your task is to:
 1. Identify the main topics and themes
@@ -243,13 +255,88 @@ Focus on providing accurate, concise information while preserving the newsletter
                 
         return tag_ids
 
-    async def _generate_content_with_gemini(self, text_content: str, subject: str) -> Dict:
-        """Try to generate content using Gemini API."""
-        try:
-            prompt = f"Subject: {subject}\n\nContent: {text_content}\n\n{self.system_prompt}"
-            response = await self.model.generate_content_async(prompt)
+    async def _wait_for_rate_limit(self, api_type: str) -> None:
+        """Wait if necessary to respect rate limits."""
+        current_time = time.time()
+        
+        # Reset counters if a minute has passed
+        if current_time - self.reset_time >= 60:
+            self.gemini_calls = 0
+            self.anthropic_calls = 0
+            self.reset_time = current_time
+        
+        if api_type == 'gemini':
+            # Ensure minimum delay between calls
+            time_since_last_call = current_time - self.last_gemini_call
+            if time_since_last_call < self.MIN_DELAY_BETWEEN_CALLS:
+                await asyncio.sleep(self.MIN_DELAY_BETWEEN_CALLS - time_since_last_call)
             
-            # Parse the response into structured data
+            # Wait if we've hit the rate limit
+            if self.gemini_calls >= self.GEMINI_CALLS_PER_MINUTE:
+                wait_time = 60 - (current_time - self.reset_time)
+                if wait_time > 0:
+                    logger.info(f"Waiting {wait_time:.2f}s for Gemini rate limit reset")
+                    await asyncio.sleep(wait_time)
+                self.gemini_calls = 0
+                self.reset_time = time.time()
+            
+            self.last_gemini_call = time.time()
+            self.gemini_calls += 1
+            
+        elif api_type == 'anthropic':
+            # Similar logic for Anthropic
+            time_since_last_call = current_time - self.last_anthropic_call
+            if time_since_last_call < self.MIN_DELAY_BETWEEN_CALLS:
+                await asyncio.sleep(self.MIN_DELAY_BETWEEN_CALLS - time_since_last_call)
+            
+            if self.anthropic_calls >= self.ANTHROPIC_CALLS_PER_MINUTE:
+                wait_time = 60 - (current_time - self.reset_time)
+                if wait_time > 0:
+                    logger.info(f"Waiting {wait_time:.2f}s for Anthropic rate limit reset")
+                    await asyncio.sleep(wait_time)
+                self.anthropic_calls = 0
+                self.reset_time = time.time()
+            
+            self.last_anthropic_call = time.time()
+            self.anthropic_calls += 1
+
+    async def _retry_with_backoff(self, func, *args, max_retries=3, initial_delay=1):
+        """Retry a function with exponential backoff."""
+        delay = initial_delay
+        last_exception = None
+        
+        for attempt in range(max_retries):
+            try:
+                return await func(*args)
+            except Exception as e:
+                last_exception = e
+                if attempt < max_retries - 1:
+                    # Check if it's a rate limit error
+                    if '429' in str(e):
+                        wait_time = delay * (2 ** attempt)
+                        logger.info(f"Rate limit hit, waiting {wait_time}s before retry {attempt + 1}")
+                        await asyncio.sleep(wait_time)
+                    else:
+                        # For other errors, use shorter delays
+                        wait_time = delay
+                        logger.warning(f"Error occurred, retrying in {wait_time}s: {str(e)}")
+                        await asyncio.sleep(wait_time)
+                else:
+                    logger.error(f"Failed after {max_retries} attempts: {str(e)}")
+                    raise last_exception
+
+    async def _generate_content_with_gemini(self, text_content: str, subject: str) -> Dict:
+        """Try to generate content using Gemini API with rate limiting and retries."""
+        async def _make_gemini_call():
+            await self._wait_for_rate_limit('gemini')
+            response = await self.model.generate_content_async(
+                f"Subject: {subject}\n\nContent: {text_content}\n\n{self.system_prompt}"
+            )
+            return response
+        
+        try:
+            response = await self._retry_with_backoff(_make_gemini_call)
+            # Rest of the existing parsing code...
             lines = response.text.split('\n')
             result = {}
             current_key = None
@@ -284,20 +371,22 @@ Focus on providing accurate, concise information while preserving the newsletter
             return None
 
     async def _generate_content_with_anthropic(self, text_content: str, subject: str) -> Dict:
-        """Try to generate content using Anthropic API."""
-        try:
-            prompt = f"Subject: {subject}\n\nContent: {text_content}\n\n{self.system_prompt}"
-            
+        """Try to generate content using Anthropic API with rate limiting and retries."""
+        async def _make_anthropic_call():
+            await self._wait_for_rate_limit('anthropic')
             message = await self.anthropic.messages.create(
                 model="claude-3-opus-20240229",
                 max_tokens=1000,
                 messages=[{
                     "role": "user",
-                    "content": prompt
+                    "content": f"Subject: {subject}\n\nContent: {text_content}\n\n{self.system_prompt}"
                 }]
             )
-            
-            # Parse the response into structured data
+            return message
+        
+        try:
+            message = await self._retry_with_backoff(_make_anthropic_call)
+            # Rest of the existing parsing code...
             lines = message.content[0].text.split('\n')
             result = {}
             current_key = None
@@ -505,6 +594,132 @@ Focus on providing accurate, concise information while preserving the newsletter
 
             logger.info("Waiting 60 seconds before next check...")
             await asyncio.sleep(60)
+
+    def create_brand_slug(self, text: str) -> str:
+        """Create a URL-friendly slug from text."""
+        # Convert to lowercase and replace spaces/special chars with hyphens
+        slug = text.lower()
+        slug = re.sub(r'[^a-z0-9]+', '-', slug)
+        slug = slug.strip('-')
+        return slug
+
+    def get_unique_brand_slug(self, cur, base_slug: str, domain: str = None) -> str:
+        """Generate a unique slug for a brand, considering domain if available."""
+        slug = base_slug
+        counter = 1
+        
+        while True:
+            # Check if this slug is already used
+            cur.execute(
+                'SELECT domain FROM "Brand" WHERE slug = %s',
+                (slug,)
+            )
+            result = cur.fetchone()
+            
+            if not result:
+                # Slug is unique, we can use it
+                return slug
+                
+            existing_domain = result[0]
+            if existing_domain == domain:
+                # Same domain means it's the same brand
+                return slug
+                
+            # Add domain-based suffix if available
+            if counter == 1 and domain:
+                # Extract first part of domain (e.g., 'india' from 'company.india.com')
+                domain_parts = domain.split('.')
+                if len(domain_parts) > 2:
+                    location_hint = domain_parts[-3]  # Get the subdomain
+                    slug = f"{base_slug}-{location_hint}"
+                    counter += 1
+                    continue
+                    
+            # If still not unique or no domain available, add number
+            slug = f"{base_slug}-{counter}"
+            counter += 1
+
+    def extract_brand_info(self, sender_email: str, sender_name: str) -> Dict[str, str]:
+        """Extract brand information from the email sender."""
+        # Extract domain from email
+        domain = sender_email.split('@')[1] if '@' in sender_email else None
+        
+        # Create brand name from sender name or email
+        name = sender_name or sender_email.split('@')[0]
+        
+        # Create initial slug from the name
+        base_slug = self.create_brand_slug(name)
+        
+        return {
+            'name': name,
+            'slug': base_slug,
+            'domain': domain,
+            'email': sender_email
+        }
+
+    def get_or_create_brand(self, cur, brand_info: Dict[str, str]) -> str:
+        """Get existing brand or create a new one with unique slug."""
+        try:
+            # First try to find by domain (most specific identifier)
+            if brand_info['domain']:
+                cur.execute(
+                    'SELECT brand_id FROM "Brand" WHERE domain = %s',
+                    (brand_info['domain'],)
+                )
+                result = cur.fetchone()
+                if result:
+                    return result[0]
+            
+            # Then try to find by email pattern
+            email_domain = brand_info['email'].split('@')[1]
+            cur.execute(
+                'SELECT brand_id FROM "Brand" WHERE domain LIKE %s',
+                (f'%.{email_domain}',)
+            )
+            result = cur.fetchone()
+            if result:
+                return result[0]
+            
+            # Generate unique slug
+            unique_slug = self.get_unique_brand_slug(cur, brand_info['slug'], brand_info['domain'])
+            
+            # Create new brand with unique slug
+            cur.execute(
+                '''INSERT INTO "Brand" (
+                    brand_id, name, slug, domain, 
+                    is_verified, is_claimed, 
+                    created_at, updated_at
+                ) VALUES (
+                    gen_random_uuid(), %s, %s, %s, 
+                    false, false, 
+                    NOW(), NOW()
+                )
+                RETURNING brand_id''',
+                (
+                    brand_info['name'],
+                    unique_slug,
+                    brand_info['domain']
+                )
+            )
+            
+            brand_id = cur.fetchone()[0]
+            
+            # Create social links entry for the brand
+            cur.execute(
+                '''INSERT INTO "SocialLinks" (
+                    id, brand_id
+                ) VALUES (
+                    gen_random_uuid(), %s
+                )''',
+                (brand_id,)
+            )
+            
+            logger.info(f"Created new brand: {brand_info['name']} (ID: {brand_id}, slug: {unique_slug})")
+            return brand_id
+            
+        except Exception as e:
+            logger.error(f"Error in get_or_create_brand: {e}")
+            raise
 
 if __name__ == "__main__":
     processor = NewsletterProcessor()
