@@ -11,12 +11,13 @@
 * maks emails as read.
 * deletes local HTML's.
 * deletes local images.
+* connects to Gemini API to assign summary & tags.
 
-[x] mark html files as text <br />
-[X] image permissions S3 <br />
-[X] connect supabase api to frontend <br />
-[X] create tags db <br />
-[X] assign summary & tags through Gemini API and save to db <br />
+[✔] mark html files as text <br />
+[✔] image permissions S3 <br />
+[✔] connect supabase api to frontend <br />
+[✔] create tags db <br />
+[✔] assign summary & tags through Gemini API and save to db <br />
 
 Using these libraries: Playwright, Beautifulsoup, PIL, imaplib, boto, s3, supabase (among others)
 
