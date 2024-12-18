@@ -373,17 +373,14 @@ Focus on providing accurate, concise information while preserving the newsletter
                     raise last_exception
 
     async def _generate_content_with_gemini(self, text_content: str, subject: str) -> Dict:
-        """Try to generate content using Gemini API with rate limiting and retries."""
-        async def _make_gemini_call():
+        """Try to generate content using Gemini API with rate limiting."""
+        try:
             await self._wait_for_rate_limit('gemini')
             response = await self.model.generate_content_async(
                 f"Subject: {subject}\n\nContent: {text_content}\n\n{self.system_prompt}"
             )
-            return response
-        
-        try:
-            response = await self._retry_with_backoff(_make_gemini_call)
-            # Rest of the existing parsing code...
+            
+            # Parse the response
             lines = response.text.split('\n')
             result = {}
             current_key = None
@@ -418,8 +415,8 @@ Focus on providing accurate, concise information while preserving the newsletter
             return None
 
     async def _generate_content_with_anthropic(self, text_content: str, subject: str) -> Dict:
-        """Try to generate content using Anthropic API with rate limiting and retries."""
-        async def _make_anthropic_call():
+        """Try to generate content using Anthropic API with rate limiting."""
+        try:
             await self._wait_for_rate_limit('anthropic')
             message = await self.anthropic.messages.create(
                 model="claude-3-opus-20240229",
@@ -429,11 +426,8 @@ Focus on providing accurate, concise information while preserving the newsletter
                     "content": f"Subject: {subject}\n\nContent: {text_content}\n\n{self.system_prompt}"
                 }]
             )
-            return message
-        
-        try:
-            message = await self._retry_with_backoff(_make_anthropic_call)
-            # Rest of the existing parsing code...
+            
+            # Parse the response
             lines = message.content[0].text.split('\n')
             result = {}
             current_key = None
