@@ -81,21 +81,28 @@ class NewsletterProcessor:
         self.HUGGINGFACE_CALLS_PER_MINUTE = 30
         self.MIN_DELAY_BETWEEN_CALLS = 1
         
-        self.system_prompt = """You are an AI trained to analyze newsletters and extract key information.
+        self.system_prompt = """You are an AI trained to analyze newsletters and create engaging, SEO-friendly summaries.
+
 Your task is to:
-1. Identify the main topics and themes
-2. Extract key insights and takeaways
-3. Identify any products or services mentioned
-4. Maintain the original sender's tone and style
-5. Format tags in PascalCase (e.g., "ArtificialIntelligence", "ProductUpdate")
+1. Create a comprehensive summary (250-300 words) that:
+   - Captures the main message and key points
+   - Maintains the original sender's tone and style
+   - Includes relevant keywords for SEO
+   - Provides valuable insights for readers
+2. Extract key information:
+   - Important keywords and phrases (for SEO)
+   - Products, services, or tools mentioned
+   - Key technologies or concepts discussed
+3. Format tags in PascalCase (e.g., "ArtificialIntelligence", "ProductUpdate")
 
 Please format your response in the following structure:
-Summary: [A concise summary of the newsletter]
+Summary: [A detailed 250-300 word summary incorporating key terms and maintaining the sender's tone]
+Keywords: [Comma-separated list of important terms and phrases for SEO]
 Tags: [Comma-separated list of PascalCase tags]
 Products: [Comma-separated list of products/services mentioned]
 Key Insights: [Bullet points of key takeaways]
 
-Focus on providing accurate, concise information while preserving the newsletter's voice."""
+Focus on creating content that is both informative for readers and optimized for search engines."""
 
     def get_db_config(self):
         db_url = os.getenv('DIRECT_DATABASE_URL')
@@ -373,7 +380,7 @@ Focus on providing accurate, concise information while preserving the newsletter
                     raise last_exception
 
     async def _generate_content_with_gemini(self, text_content: str, subject: str) -> Dict:
-        """Try to generate content using Gemini API with rate limiting."""
+        """Generate content using Gemini API with rate limiting."""
         try:
             await self._wait_for_rate_limit('gemini')
             response = await self.model.generate_content_async(
@@ -389,6 +396,10 @@ Focus on providing accurate, concise information while preserving the newsletter
                 if line.startswith('Summary:'):
                     current_key = 'summary'
                     result[current_key] = line.replace('Summary:', '').strip()
+                elif line.startswith('Keywords:'):
+                    current_key = 'keywords'
+                    keywords_text = line.replace('Keywords:', '').strip()
+                    result[current_key] = [kw.strip() for kw in keywords_text.split(',')]
                 elif line.startswith('Tags:'):
                     current_key = 'tags'
                     tags_text = line.replace('Tags:', '').strip()
@@ -415,12 +426,12 @@ Focus on providing accurate, concise information while preserving the newsletter
             return None
 
     async def _generate_content_with_anthropic(self, text_content: str, subject: str) -> Dict:
-        """Try to generate content using Anthropic API with rate limiting."""
+        """Generate content using Anthropic API with rate limiting."""
         try:
             await self._wait_for_rate_limit('anthropic')
             message = await self.anthropic.messages.create(
                 model="claude-3-opus-20240229",
-                max_tokens=1000,
+                max_tokens=1500,  # Increased for longer summaries
                 messages=[{
                     "role": "user",
                     "content": f"Subject: {subject}\n\nContent: {text_content}\n\n{self.system_prompt}"
@@ -436,6 +447,10 @@ Focus on providing accurate, concise information while preserving the newsletter
                 if line.startswith('Summary:'):
                     current_key = 'summary'
                     result[current_key] = line.replace('Summary:', '').strip()
+                elif line.startswith('Keywords:'):
+                    current_key = 'keywords'
+                    keywords_text = line.replace('Keywords:', '').strip()
+                    result[current_key] = [kw.strip() for kw in keywords_text.split(',')]
                 elif line.startswith('Tags:'):
                     current_key = 'tags'
                     tags_text = line.replace('Tags:', '').strip()
@@ -462,8 +477,8 @@ Focus on providing accurate, concise information while preserving the newsletter
             return None
 
     async def _generate_content_with_together(self, text_content: str, subject: str) -> Dict:
-        """Try to generate content using Together AI API with rate limiting and retries."""
-        async def _make_together_call():
+        """Generate content using Together AI API with rate limiting."""
+        try:
             await self._wait_for_rate_limit('together')
             headers = {
                 "Authorization": f"Bearer {TOGETHER_API_KEY}",
@@ -486,7 +501,7 @@ Content: {text_content}
                     json={
                         "model": self.TOGETHER_MODEL,
                         "prompt": prompt,
-                        "max_tokens": 1000,
+                        "max_tokens": 1500,  # Increased for longer summaries
                         "temperature": 0.7,
                         "top_p": 0.7,
                         "top_k": 50,
@@ -496,55 +511,21 @@ Content: {text_content}
                     if response.status != 200:
                         raise Exception(f"Together AI API error: {response.status}")
                     result = await response.json()
-                    return result['output']['choices'][0]['text']
-        
-        try:
-            response = await self._retry_with_backoff(_make_together_call)
-            
-            # Parse the response similar to other LLMs
-            lines = response.split('\n')
-            result = {}
-            current_key = None
-            
-            for line in lines:
-                if line.startswith('Summary:'):
-                    current_key = 'summary'
-                    result[current_key] = line.replace('Summary:', '').strip()
-                elif line.startswith('Tags:'):
-                    current_key = 'tags'
-                    tags_text = line.replace('Tags:', '').strip()
-                    result[current_key] = [tag.strip() for tag in tags_text.split(',')]
-                elif line.startswith('Products:'):
-                    current_key = 'products'
-                    products_text = line.replace('Products:', '').strip()
-                    result[current_key] = [prod.strip() for prod in products_text.split(',')]
-                elif line.startswith('Key Insights:'):
-                    current_key = 'insights'
-                    result[current_key] = []
-                elif current_key == 'insights' and line.strip().startswith('-'):
-                    result[current_key].append(line.strip()[2:])
-                elif current_key and line.strip():
-                    if isinstance(result[current_key], list):
-                        result[current_key].append(line.strip())
-                    else:
-                        result[current_key] += ' ' + line.strip()
-            
-            return result
+                    return self._parse_llm_response(result['output']['choices'][0]['text'])
             
         except Exception as e:
             logger.error(f"Together AI API error: {e}")
             return None
 
     async def _generate_content_with_huggingface(self, text_content: str, subject: str) -> Dict:
-        """Try to generate content using Hugging Face API with rate limiting and retries."""
-        async def _make_huggingface_call():
+        """Generate content using Hugging Face API with rate limiting."""
+        try:
             await self._wait_for_rate_limit('huggingface')
             headers = {
                 "Authorization": f"Bearer {HUGGINGFACE_API_KEY}",
                 "Content-Type": "application/json"
             }
             
-            # Format prompt for Llama-2
             prompt = f"""<s>[INST] <<SYS>>
 You are an AI trained to analyze newsletters and extract key information.
 <</SYS>>
@@ -561,49 +542,51 @@ Content: {text_content}
                 async with session.post(
                     self.HUGGINGFACE_API_URL,
                     headers=headers,
-                    json={"inputs": prompt, "parameters": {"max_new_tokens": 1000}}
+                    json={"inputs": prompt, "parameters": {"max_new_tokens": 1500}}
                 ) as response:
                     if response.status != 200:
                         raise Exception(f"Hugging Face API error: {response.status}")
                     result = await response.json()
-                    return result[0]['generated_text']
-        
-        try:
-            response = await self._retry_with_backoff(_make_huggingface_call)
-            
-            # Parse the response similar to other LLMs
-            lines = response.split('\n')
-            result = {}
-            current_key = None
-            
-            for line in lines:
-                if line.startswith('Summary:'):
-                    current_key = 'summary'
-                    result[current_key] = line.replace('Summary:', '').strip()
-                elif line.startswith('Tags:'):
-                    current_key = 'tags'
-                    tags_text = line.replace('Tags:', '').strip()
-                    result[current_key] = [tag.strip() for tag in tags_text.split(',')]
-                elif line.startswith('Products:'):
-                    current_key = 'products'
-                    products_text = line.replace('Products:', '').strip()
-                    result[current_key] = [prod.strip() for prod in products_text.split(',')]
-                elif line.startswith('Key Insights:'):
-                    current_key = 'insights'
-                    result[current_key] = []
-                elif current_key == 'insights' and line.strip().startswith('-'):
-                    result[current_key].append(line.strip()[2:])
-                elif current_key and line.strip():
-                    if isinstance(result[current_key], list):
-                        result[current_key].append(line.strip())
-                    else:
-                        result[current_key] += ' ' + line.strip()
-            
-            return result
+                    return self._parse_llm_response(result[0]['generated_text'])
             
         except Exception as e:
             logger.error(f"Hugging Face API error: {e}")
             return None
+
+    def _parse_llm_response(self, text: str) -> Dict:
+        """Parse LLM response into structured format."""
+        lines = text.split('\n')
+        result = {}
+        current_key = None
+        
+        for line in lines:
+            if line.startswith('Summary:'):
+                current_key = 'summary'
+                result[current_key] = line.replace('Summary:', '').strip()
+            elif line.startswith('Keywords:'):
+                current_key = 'keywords'
+                keywords_text = line.replace('Keywords:', '').strip()
+                result[current_key] = [kw.strip() for kw in keywords_text.split(',')]
+            elif line.startswith('Tags:'):
+                current_key = 'tags'
+                tags_text = line.replace('Tags:', '').strip()
+                result[current_key] = [tag.strip() for tag in tags_text.split(',')]
+            elif line.startswith('Products:'):
+                current_key = 'products'
+                products_text = line.replace('Products:', '').strip()
+                result[current_key] = [prod.strip() for prod in products_text.split(',')]
+            elif line.startswith('Key Insights:'):
+                current_key = 'insights'
+                result[current_key] = []
+            elif current_key == 'insights' and line.strip().startswith('-'):
+                result[current_key].append(line.strip()[2:])
+            elif current_key and line.strip():
+                if isinstance(result[current_key], list):
+                    result[current_key].append(line.strip())
+                else:
+                    result[current_key] += ' ' + line.strip()
+        
+        return result
 
     def _local_fallback_analysis(self, text_content: str, subject: str) -> Dict:
         """Perform basic text analysis when all LLM APIs fail."""
@@ -982,6 +965,7 @@ Content: {text_content}
         """Log the LLM output in a readable format."""
         logger.info(f"\n{'='*50}\n{llm_name} Output:\n{'='*50}")
         logger.info(f"Summary: {analysis.get('summary', 'N/A')}")
+        logger.info(f"Keywords: {', '.join(analysis.get('keywords', []))}")
         logger.info(f"Tags: {', '.join(analysis.get('tags', []))}")
         logger.info(f"Products: {', '.join(analysis.get('products', []))}")
         logger.info("Key Insights:")
