@@ -605,47 +605,85 @@ Content: {text_content}
             logger.error(f"Hugging Face API error: {e}")
             return None
 
-    async def process_email(self, email_content: str, subject: str) -> Dict:
-        """Process raw email content and extract structured information."""
-        soup = BeautifulSoup(email_content, 'html.parser')
-        text_content = self._extract_text_with_structure(soup)
-        
-        # Try Gemini first
-        analysis = await self._generate_content_with_gemini(text_content, subject)
-        if analysis:
-            self._log_llm_output("Gemini", analysis)
-        
-        # If Gemini fails, try Anthropic
-        if analysis is None:
-            logger.info("Gemini API failed, falling back to Anthropic API")
-            analysis = await self._generate_content_with_anthropic(text_content, subject)
-            if analysis:
-                self._log_llm_output("Anthropic", analysis)
-        
-        # If Anthropic fails, try Together AI
-        if analysis is None:
-            logger.info("Anthropic API failed, falling back to Together AI")
-            analysis = await self._generate_content_with_together(text_content, subject)
-            if analysis:
-                self._log_llm_output("Together AI", analysis)
-        
-        # If Together AI fails, try Hugging Face
-        if analysis is None:
-            logger.info("Together AI failed, falling back to Hugging Face")
-            analysis = await self._generate_content_with_huggingface(text_content, subject)
-            if analysis:
-                self._log_llm_output("Hugging Face", analysis)
-        
-        # If all APIs fail, return minimal structure
-        if analysis is None:
-            logger.error("All LLM APIs failed")
-            analysis = {
+    def _local_fallback_analysis(self, text_content: str, subject: str) -> Dict:
+        """Perform basic text analysis when all LLM APIs fail."""
+        try:
+            # Basic summary: Use subject and first paragraph
+            soup = BeautifulSoup(text_content, 'html.parser')
+            first_paragraph = soup.find('p')
+            summary = f"{subject} - {first_paragraph.get_text()[:200]}..." if first_paragraph else subject
+            
+            # Basic tag extraction from subject and first paragraph
+            text_for_tags = f"{subject} {first_paragraph.get_text() if first_paragraph else ''}"
+            words = re.findall(r'\b\w+\b', text_for_tags)
+            common_tech_terms = {
+                'AI', 'Machine Learning', 'Data', 'Cloud', 'Security',
+                'Marketing', 'Business', 'Technology', 'Software', 'Development',
+                'Web', 'Mobile', 'Analytics', 'Digital', 'Innovation'
+            }
+            
+            # Extract potential tags from text
+            tags = []
+            for term in common_tech_terms:
+                if term.lower() in text_for_tags.lower():
+                    tags.append(term.replace(' ', ''))
+            
+            # Extract potential product mentions (look for capitalized terms)
+            products = re.findall(r'\b[A-Z][a-zA-Z]*(?:\s+[A-Z][a-zA-Z]*)*\b', text_for_tags)
+            products = [p for p in products if len(p) > 2 and p not in {'I', 'A', 'The'}]
+            
+            # Extract key sentences as insights
+            sentences = re.split(r'[.!?]+', text_content)
+            insights = [s.strip() for s in sentences[:3] if len(s.strip()) > 20][:3]
+            
+            return {
+                'summary': summary,
+                'tags': tags[:5],  # Limit to 5 tags
+                'products': products[:3],  # Limit to 3 products
+                'insights': insights
+            }
+            
+        except Exception as e:
+            logger.error(f"Error in local fallback analysis: {e}")
+            return {
                 'summary': f"Failed to generate summary for: {subject}",
                 'tags': [],
                 'products': [],
                 'insights': []
             }
-            self._log_llm_output("Fallback", analysis)
+
+    async def process_email(self, email_content: str, subject: str) -> Dict:
+        """Process raw email content and extract structured information."""
+        soup = BeautifulSoup(email_content, 'html.parser')
+        text_content = self._extract_text_with_structure(soup)
+        
+        # Try each API in sequence
+        apis = [
+            ('Gemini', self._generate_content_with_gemini),
+            ('Anthropic', self._generate_content_with_anthropic),
+            ('Together AI', self._generate_content_with_together),
+            ('Hugging Face', self._generate_content_with_huggingface)
+        ]
+        
+        analysis = None
+        for api_name, api_func in apis:
+            try:
+                if analysis is None:
+                    logger.info(f"Attempting analysis with {api_name}...")
+                    analysis = await api_func(text_content, subject)
+                    if analysis:
+                        self._log_llm_output(api_name, analysis)
+                        break
+                    else:
+                        logger.error(f"{api_name} analysis returned None")
+            except Exception as e:
+                logger.error(f"{api_name} API error: {str(e)}")
+        
+        # If all APIs fail, use local fallback
+        if analysis is None:
+            logger.warning("All LLM APIs failed, using local fallback analysis")
+            analysis = self._local_fallback_analysis(text_content, subject)
+            self._log_llm_output("Local Fallback", analysis)
         
         return {
             'content': text_content,
