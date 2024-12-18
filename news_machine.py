@@ -708,8 +708,18 @@ Content: {text_content}
             if isinstance(subject, bytes):
                 subject = subject.decode()
             
-            sender_email = email_msg['From']
-            sender_name = sender_email.split('<')[0].strip().replace('"', '')
+            # Extract sender information properly
+            from_header = decode_header(email_msg['From'])[0][0]
+            if isinstance(from_header, bytes):
+                from_header = from_header.decode()
+            
+            # Parse sender email and name
+            if '<' in from_header and '>' in from_header:
+                sender_name = from_header.split('<')[0].strip().replace('"', '')
+                sender_email = from_header.split('<')[1].split('>')[0].strip()
+            else:
+                sender_name = None
+                sender_email = from_header.strip()
 
             html_content = None
             for part in email_msg.walk():
@@ -738,25 +748,30 @@ Content: {text_content}
                         master_user_id = self.get_master_user_id()
                         cur.execute("BEGIN")
 
+                        # Extract and create/get brand
+                        brand_info = self.extract_brand_info(sender_email, sender_name)
+                        brand_id = self.get_or_create_brand(cur, brand_info)
+                        logger.info(f"Using brand: {brand_info['name']} (ID: {brand_id})")
+
                         # Get products link safely
                         products = processed_data['analysis'].get('products', [])
                         products_link = products[0] if products else None
 
-                        # Insert newsletter with correct column names
+                        # Insert newsletter with brand_id
                         cur.execute("""
                             INSERT INTO "Newsletter" (
                                 user_id, sender, published_at, subject, html_file_url,
                                 full_screenshot_url, top_screenshot_url,
                                 likes_count, you_rocks_count, created_at,
-                                summary, products_link
+                                summary, products_link, brand_id
                             ) 
-                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                             RETURNING newsletter_id
                         """, (
                             master_user_id, sender_name, email_date, subject,
                             html_s3_link, full_screenshot_url, top_screenshot_url,
                             0, 0, datetime.now(timezone.utc), processed_data['analysis'].get('summary'),
-                            products_link
+                            products_link, brand_id
                         ))
                         
                         newsletter_id = cur.fetchone()[0]
