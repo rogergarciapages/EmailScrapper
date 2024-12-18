@@ -61,7 +61,7 @@ class NewsletterProcessor:
         self.TOGETHER_MODEL = "mistralai/Mixtral-8x7B-Instruct-v0.1"
         
         # Initialize Hugging Face settings
-        self.HUGGINGFACE_API_URL = "https://api-inference.huggingface.co/models/meta-llama/Llama-2-70b-chat-hf"
+        self.HUGGINGFACE_API_URL = "https://api-inference.huggingface.co/models/mistralai/Mixtral-8x7B-Instruct-v0.1"
         
         # Rate limiting setup
         self.last_gemini_call = 0
@@ -526,11 +526,8 @@ Content: {text_content}
                 "Content-Type": "application/json"
             }
             
-            prompt = f"""<s>[INST] <<SYS>>
-You are an AI trained to analyze newsletters and extract key information.
-<</SYS>>
-
-Here's a newsletter to analyze:
+            # Format prompt for Mixtral model
+            prompt = f"""<s>[INST] Here's a newsletter to analyze:
 
 Subject: {subject}
 
@@ -542,15 +539,35 @@ Content: {text_content}
                 async with session.post(
                     self.HUGGINGFACE_API_URL,
                     headers=headers,
-                    json={"inputs": prompt, "parameters": {"max_new_tokens": 1500}}
+                    json={
+                        "inputs": prompt,
+                        "parameters": {
+                            "max_new_tokens": 1500,
+                            "temperature": 0.7,
+                            "top_p": 0.9,
+                            "return_full_text": False
+                        }
+                    }
                 ) as response:
+                    response_text = await response.text()
                     if response.status != 200:
-                        raise Exception(f"Hugging Face API error: {response.status}")
+                        logger.error(f"Hugging Face API error status {response.status}: {response_text}")
+                        raise Exception(f"Hugging Face API error: {response.status} - {response_text}")
+                    
                     result = await response.json()
-                    return self._parse_llm_response(result[0]['generated_text'])
+                    if isinstance(result, list) and len(result) > 0:
+                        generated_text = result[0].get('generated_text', '')
+                        if generated_text:
+                            return self._parse_llm_response(generated_text)
+                        else:
+                            logger.error("Hugging Face API returned empty response")
+                            return None
+                    else:
+                        logger.error(f"Unexpected Hugging Face API response format: {result}")
+                        return None
             
         except Exception as e:
-            logger.error(f"Hugging Face API error: {e}")
+            logger.error(f"Hugging Face API error: {str(e)}")
             return None
 
     def _parse_llm_response(self, text: str) -> Dict:
@@ -685,11 +702,69 @@ Content: {text_content}
         
         return str(soup)
 
+    def decode_email_subject(self, email_msg) -> str:
+        """Decode email subject properly handling emojis and special characters."""
+        try:
+            # Get raw subject
+            subject_header = email_msg['Subject']
+            if not subject_header:
+                return "Untitled Newsletter"
+
+            # If it's already a string, just clean it
+            if isinstance(subject_header, str):
+                return self.clean_subject(subject_header)
+
+            # Decode header parts
+            parts = decode_header(subject_header)
+            subject = ""
+            
+            for part, charset in parts:
+                if isinstance(part, bytes):
+                    try:
+                        # Try UTF-8 first for emoji support
+                        subject += part.decode('utf-8')
+                    except UnicodeDecodeError:
+                        try:
+                            # Try provided charset
+                            if charset:
+                                subject += part.decode(charset)
+                            else:
+                                # Fallback to other encodings
+                                try:
+                                    subject += part.decode('latin1')
+                                except UnicodeDecodeError:
+                                    subject += part.decode('ascii', errors='replace')
+                        except Exception as e:
+                            logger.warning(f"Error decoding subject part with charset {charset}: {e}")
+                            subject += part.decode('ascii', errors='replace')
+                else:
+                    subject += str(part)
+
+            return self.clean_subject(subject)
+            
+        except Exception as e:
+            logger.error(f"Error decoding subject: {e}")
+            return "Untitled Newsletter"
+
+    def clean_subject(self, subject: str) -> str:
+        """Clean the subject while preserving emojis and special characters."""
+        if not subject or not subject.strip():
+            return "Untitled Newsletter"
+            
+        # Remove any null bytes or control characters except newlines
+        subject = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', '', subject)
+        # Replace multiple spaces with single space
+        subject = re.sub(r'\s+', ' ', subject)
+        # Strip leading/trailing whitespace
+        subject = subject.strip()
+        
+        return subject if subject else "Untitled Newsletter"
+
     async def process_and_save_email(self, email_msg) -> None:
         try:
-            subject = decode_header(email_msg['Subject'])[0][0]
-            if isinstance(subject, bytes):
-                subject = subject.decode()
+            # Use the new subject decoding method
+            subject = self.decode_email_subject(email_msg)
+            logger.info(f"Processing email with subject: {subject}")
             
             # Extract sender information properly
             from_header = decode_header(email_msg['From'])[0][0]
