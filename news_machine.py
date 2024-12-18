@@ -24,6 +24,8 @@ from dateutil import parser as dateutil_parser
 from typing import Dict, List, Optional
 import anthropic
 from anthropic import Anthropic
+import aiohttp
+from pprint import pformat
 
 # Load environment variables
 load_dotenv()
@@ -41,6 +43,8 @@ S3_REGION = os.getenv('AWS_REGION', 'eu-central-1')
 EMAIL_USER = os.getenv('EMAIL_USER')
 EMAIL_PASS = os.getenv('EMAIL_PASS')
 BARD_API_KEY = os.getenv('BARD_API_KEY')
+TOGETHER_API_KEY = os.getenv('TOGETHER_API_KEY')
+HUGGINGFACE_API_KEY = os.getenv('HUGGINGFACE_API_KEY')
 
 class NewsletterProcessor:
     def __init__(self):
@@ -52,17 +56,30 @@ class NewsletterProcessor:
         anthropic_api_key = os.getenv('ANTHROPIC_API')
         self.anthropic = Anthropic(api_key=anthropic_api_key)
         
+        # Initialize Together AI settings
+        self.TOGETHER_API_URL = "https://api.together.xyz/inference"
+        self.TOGETHER_MODEL = "mistralai/Mixtral-8x7B-Instruct-v0.1"
+        
+        # Initialize Hugging Face settings
+        self.HUGGINGFACE_API_URL = "https://api-inference.huggingface.co/models/meta-llama/Llama-2-70b-chat-hf"
+        
         # Rate limiting setup
         self.last_gemini_call = 0
         self.last_anthropic_call = 0
+        self.last_together_call = 0
+        self.last_huggingface_call = 0
         self.gemini_calls = 0
         self.anthropic_calls = 0
+        self.together_calls = 0
+        self.huggingface_calls = 0
         self.reset_time = time.time()
         
-        # Rate limits (adjust these based on your API quotas)
+        # Rate limits
         self.GEMINI_CALLS_PER_MINUTE = 50
         self.ANTHROPIC_CALLS_PER_MINUTE = 15
-        self.MIN_DELAY_BETWEEN_CALLS = 1  # seconds
+        self.TOGETHER_CALLS_PER_MINUTE = 50
+        self.HUGGINGFACE_CALLS_PER_MINUTE = 30
+        self.MIN_DELAY_BETWEEN_CALLS = 1
         
         self.system_prompt = """You are an AI trained to analyze newsletters and extract key information.
 Your task is to:
@@ -259,19 +276,18 @@ Focus on providing accurate, concise information while preserving the newsletter
         """Wait if necessary to respect rate limits."""
         current_time = time.time()
         
-        # Reset counters if a minute has passed
         if current_time - self.reset_time >= 60:
             self.gemini_calls = 0
             self.anthropic_calls = 0
+            self.together_calls = 0
+            self.huggingface_calls = 0
             self.reset_time = current_time
         
         if api_type == 'gemini':
-            # Ensure minimum delay between calls
             time_since_last_call = current_time - self.last_gemini_call
             if time_since_last_call < self.MIN_DELAY_BETWEEN_CALLS:
                 await asyncio.sleep(self.MIN_DELAY_BETWEEN_CALLS - time_since_last_call)
             
-            # Wait if we've hit the rate limit
             if self.gemini_calls >= self.GEMINI_CALLS_PER_MINUTE:
                 wait_time = 60 - (current_time - self.reset_time)
                 if wait_time > 0:
@@ -284,7 +300,6 @@ Focus on providing accurate, concise information while preserving the newsletter
             self.gemini_calls += 1
             
         elif api_type == 'anthropic':
-            # Similar logic for Anthropic
             time_since_last_call = current_time - self.last_anthropic_call
             if time_since_last_call < self.MIN_DELAY_BETWEEN_CALLS:
                 await asyncio.sleep(self.MIN_DELAY_BETWEEN_CALLS - time_since_last_call)
@@ -299,6 +314,38 @@ Focus on providing accurate, concise information while preserving the newsletter
             
             self.last_anthropic_call = time.time()
             self.anthropic_calls += 1
+            
+        elif api_type == 'together':
+            time_since_last_call = current_time - self.last_together_call
+            if time_since_last_call < self.MIN_DELAY_BETWEEN_CALLS:
+                await asyncio.sleep(self.MIN_DELAY_BETWEEN_CALLS - time_since_last_call)
+            
+            if self.together_calls >= self.TOGETHER_CALLS_PER_MINUTE:
+                wait_time = 60 - (current_time - self.reset_time)
+                if wait_time > 0:
+                    logger.info(f"Waiting {wait_time:.2f}s for Together AI rate limit reset")
+                    await asyncio.sleep(wait_time)
+                self.together_calls = 0
+                self.reset_time = time.time()
+            
+            self.last_together_call = time.time()
+            self.together_calls += 1
+        
+        elif api_type == 'huggingface':
+            time_since_last_call = current_time - self.last_huggingface_call
+            if time_since_last_call < self.MIN_DELAY_BETWEEN_CALLS:
+                await asyncio.sleep(self.MIN_DELAY_BETWEEN_CALLS - time_since_last_call)
+            
+            if self.huggingface_calls >= self.HUGGINGFACE_CALLS_PER_MINUTE:
+                wait_time = 60 - (current_time - self.reset_time)
+                if wait_time > 0:
+                    logger.info(f"Waiting {wait_time:.2f}s for Hugging Face rate limit reset")
+                    await asyncio.sleep(wait_time)
+                self.huggingface_calls = 0
+                self.reset_time = time.time()
+            
+            self.last_huggingface_call = time.time()
+            self.huggingface_calls += 1
 
     async def _retry_with_backoff(self, func, *args, max_retries=3, initial_delay=1):
         """Retry a function with exponential backoff."""
@@ -420,6 +467,150 @@ Focus on providing accurate, concise information while preserving the newsletter
             logger.error(f"Anthropic API error: {e}")
             return None
 
+    async def _generate_content_with_together(self, text_content: str, subject: str) -> Dict:
+        """Try to generate content using Together AI API with rate limiting and retries."""
+        async def _make_together_call():
+            await self._wait_for_rate_limit('together')
+            headers = {
+                "Authorization": f"Bearer {TOGETHER_API_KEY}",
+                "Content-Type": "application/json"
+            }
+            
+            # Format prompt for Mixtral model
+            prompt = f"""<s>[INST] Here's a newsletter to analyze:
+
+Subject: {subject}
+
+Content: {text_content}
+
+{self.system_prompt}[/INST]</s>"""
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    self.TOGETHER_API_URL,
+                    headers=headers,
+                    json={
+                        "model": self.TOGETHER_MODEL,
+                        "prompt": prompt,
+                        "max_tokens": 1000,
+                        "temperature": 0.7,
+                        "top_p": 0.7,
+                        "top_k": 50,
+                        "repetition_penalty": 1.1
+                    }
+                ) as response:
+                    if response.status != 200:
+                        raise Exception(f"Together AI API error: {response.status}")
+                    result = await response.json()
+                    return result['output']['choices'][0]['text']
+        
+        try:
+            response = await self._retry_with_backoff(_make_together_call)
+            
+            # Parse the response similar to other LLMs
+            lines = response.split('\n')
+            result = {}
+            current_key = None
+            
+            for line in lines:
+                if line.startswith('Summary:'):
+                    current_key = 'summary'
+                    result[current_key] = line.replace('Summary:', '').strip()
+                elif line.startswith('Tags:'):
+                    current_key = 'tags'
+                    tags_text = line.replace('Tags:', '').strip()
+                    result[current_key] = [tag.strip() for tag in tags_text.split(',')]
+                elif line.startswith('Products:'):
+                    current_key = 'products'
+                    products_text = line.replace('Products:', '').strip()
+                    result[current_key] = [prod.strip() for prod in products_text.split(',')]
+                elif line.startswith('Key Insights:'):
+                    current_key = 'insights'
+                    result[current_key] = []
+                elif current_key == 'insights' and line.strip().startswith('-'):
+                    result[current_key].append(line.strip()[2:])
+                elif current_key and line.strip():
+                    if isinstance(result[current_key], list):
+                        result[current_key].append(line.strip())
+                    else:
+                        result[current_key] += ' ' + line.strip()
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Together AI API error: {e}")
+            return None
+
+    async def _generate_content_with_huggingface(self, text_content: str, subject: str) -> Dict:
+        """Try to generate content using Hugging Face API with rate limiting and retries."""
+        async def _make_huggingface_call():
+            await self._wait_for_rate_limit('huggingface')
+            headers = {
+                "Authorization": f"Bearer {HUGGINGFACE_API_KEY}",
+                "Content-Type": "application/json"
+            }
+            
+            # Format prompt for Llama-2
+            prompt = f"""<s>[INST] <<SYS>>
+You are an AI trained to analyze newsletters and extract key information.
+<</SYS>>
+
+Here's a newsletter to analyze:
+
+Subject: {subject}
+
+Content: {text_content}
+
+{self.system_prompt}[/INST]</s>"""
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    self.HUGGINGFACE_API_URL,
+                    headers=headers,
+                    json={"inputs": prompt, "parameters": {"max_new_tokens": 1000}}
+                ) as response:
+                    if response.status != 200:
+                        raise Exception(f"Hugging Face API error: {response.status}")
+                    result = await response.json()
+                    return result[0]['generated_text']
+        
+        try:
+            response = await self._retry_with_backoff(_make_huggingface_call)
+            
+            # Parse the response similar to other LLMs
+            lines = response.split('\n')
+            result = {}
+            current_key = None
+            
+            for line in lines:
+                if line.startswith('Summary:'):
+                    current_key = 'summary'
+                    result[current_key] = line.replace('Summary:', '').strip()
+                elif line.startswith('Tags:'):
+                    current_key = 'tags'
+                    tags_text = line.replace('Tags:', '').strip()
+                    result[current_key] = [tag.strip() for tag in tags_text.split(',')]
+                elif line.startswith('Products:'):
+                    current_key = 'products'
+                    products_text = line.replace('Products:', '').strip()
+                    result[current_key] = [prod.strip() for prod in products_text.split(',')]
+                elif line.startswith('Key Insights:'):
+                    current_key = 'insights'
+                    result[current_key] = []
+                elif current_key == 'insights' and line.strip().startswith('-'):
+                    result[current_key].append(line.strip()[2:])
+                elif current_key and line.strip():
+                    if isinstance(result[current_key], list):
+                        result[current_key].append(line.strip())
+                    else:
+                        result[current_key] += ' ' + line.strip()
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Hugging Face API error: {e}")
+            return None
+
     async def process_email(self, email_content: str, subject: str) -> Dict:
         """Process raw email content and extract structured information."""
         soup = BeautifulSoup(email_content, 'html.parser')
@@ -427,21 +618,40 @@ Focus on providing accurate, concise information while preserving the newsletter
         
         # Try Gemini first
         analysis = await self._generate_content_with_gemini(text_content, subject)
+        if analysis:
+            self._log_llm_output("Gemini", analysis)
         
         # If Gemini fails, try Anthropic
         if analysis is None:
             logger.info("Gemini API failed, falling back to Anthropic API")
             analysis = await self._generate_content_with_anthropic(text_content, subject)
-            
-        # If both APIs fail, return minimal structure
+            if analysis:
+                self._log_llm_output("Anthropic", analysis)
+        
+        # If Anthropic fails, try Together AI
         if analysis is None:
-            logger.error("Both Gemini and Anthropic APIs failed")
+            logger.info("Anthropic API failed, falling back to Together AI")
+            analysis = await self._generate_content_with_together(text_content, subject)
+            if analysis:
+                self._log_llm_output("Together AI", analysis)
+        
+        # If Together AI fails, try Hugging Face
+        if analysis is None:
+            logger.info("Together AI failed, falling back to Hugging Face")
+            analysis = await self._generate_content_with_huggingface(text_content, subject)
+            if analysis:
+                self._log_llm_output("Hugging Face", analysis)
+        
+        # If all APIs fail, return minimal structure
+        if analysis is None:
+            logger.error("All LLM APIs failed")
             analysis = {
                 'summary': f"Failed to generate summary for: {subject}",
                 'tags': [],
                 'products': [],
                 'insights': []
             }
+            self._log_llm_output("Fallback", analysis)
         
         return {
             'content': text_content,
@@ -720,6 +930,17 @@ Focus on providing accurate, concise information while preserving the newsletter
         except Exception as e:
             logger.error(f"Error in get_or_create_brand: {e}")
             raise
+
+    def _log_llm_output(self, llm_name: str, analysis: Dict) -> None:
+        """Log the LLM output in a readable format."""
+        logger.info(f"\n{'='*50}\n{llm_name} Output:\n{'='*50}")
+        logger.info(f"Summary: {analysis.get('summary', 'N/A')}")
+        logger.info(f"Tags: {', '.join(analysis.get('tags', []))}")
+        logger.info(f"Products: {', '.join(analysis.get('products', []))}")
+        logger.info("Key Insights:")
+        for insight in analysis.get('insights', []):
+            logger.info(f"  - {insight}")
+        logger.info('='*50)
 
 if __name__ == "__main__":
     processor = NewsletterProcessor()
