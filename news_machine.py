@@ -251,11 +251,16 @@ Focus on creating content that is both informative for readers and optimized for
             counter += 1
 
     def get_or_create_tags(self, tags, conn, cur):
+        """Get existing tags or create new ones, handling compound tags properly."""
         tag_ids = []
         for tag_name in tags:
             tag_name = tag_name.strip()
             if not tag_name:
                 continue
+
+            # Convert to PascalCase if not already
+            if not tag_name[0].isupper():
+                tag_name = ''.join(word.capitalize() for word in tag_name.split())
 
             cur.execute(
                 'SELECT id, name, slug FROM "Tag" WHERE LOWER(name) = LOWER(%s)',
@@ -587,7 +592,21 @@ Content: {text_content}
             elif line.startswith('Tags:'):
                 current_key = 'tags'
                 tags_text = line.replace('Tags:', '').strip()
-                result[current_key] = [tag.strip() for tag in tags_text.split(',')]
+                # Split by comma and handle nested commas in tags
+                raw_tags = [tag.strip() for tag in tags_text.split(',')]
+                processed_tags = []
+                for tag in raw_tags:
+                    # If tag contains multiple words with first letters capitalized, split it
+                    if ' ' in tag and all(word[0].isupper() for word in tag.split()):
+                        processed_tags.extend([t.strip() for t in tag.split()])
+                    else:
+                        processed_tags.append(tag)
+                # Remove any empty tags and convert to PascalCase
+                result[current_key] = [
+                    ''.join(word.capitalize() for word in tag.split())
+                    for tag in processed_tags
+                    if tag.strip()
+                ]
             elif line.startswith('Products:'):
                 current_key = 'products'
                 products_text = line.replace('Products:', '').strip()
