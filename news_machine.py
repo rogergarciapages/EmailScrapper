@@ -729,36 +729,45 @@ Content: {text_content}
             if not subject_header:
                 return "Untitled Newsletter"
 
-            # If it's already a string, just clean it
-            if isinstance(subject_header, str):
+            # If it's already a string and doesn't contain encoded parts, just clean it
+            if isinstance(subject_header, str) and not '=?' in subject_header:
                 return self.clean_subject(subject_header)
 
             # Decode header parts
+            decoded_parts = []
             parts = decode_header(subject_header)
-            subject = ""
             
             for part, charset in parts:
                 if isinstance(part, bytes):
                     try:
-                        # Try UTF-8 first for emoji support
-                        subject += part.decode('utf-8')
-                    except UnicodeDecodeError:
-                        try:
-                            # Try provided charset
-                            if charset:
-                                subject += part.decode(charset)
-                            else:
+                        # Try with provided charset first
+                        if charset:
+                            decoded_parts.append(part.decode(charset))
+                        else:
+                            # Try UTF-8 first for emoji support
+                            try:
+                                decoded_parts.append(part.decode('utf-8'))
+                            except UnicodeDecodeError:
                                 # Fallback to other encodings
                                 try:
-                                    subject += part.decode('latin1')
+                                    decoded_parts.append(part.decode('latin1'))
                                 except UnicodeDecodeError:
-                                    subject += part.decode('ascii', errors='replace')
-                        except Exception as e:
-                            logger.warning(f"Error decoding subject part with charset {charset}: {e}")
-                            subject += part.decode('ascii', errors='replace')
+                                    decoded_parts.append(part.decode('ascii', errors='replace'))
+                    except Exception as e:
+                        logger.warning(f"Error decoding subject part: {e}")
+                        # Last resort fallback
+                        decoded_parts.append(part.decode('ascii', errors='replace'))
                 else:
-                    subject += str(part)
+                    decoded_parts.append(str(part))
 
+            # Join parts and clean
+            subject = ''.join(decoded_parts)
+            
+            # Handle special cases of Q-encoded text that wasn't properly decoded
+            subject = re.sub(r'=\?utf-8\?[Qq]\?(.*?)\?=', r'\1', subject)
+            subject = subject.replace('=20', ' ')  # Fix common Q-encoding space
+            subject = subject.replace('&=', '&')   # Fix common Q-encoding ampersand
+            
             return self.clean_subject(subject)
             
         except Exception as e:
@@ -769,11 +778,14 @@ Content: {text_content}
         """Clean the subject while preserving emojis and special characters."""
         if not subject or not subject.strip():
             return "Untitled Newsletter"
-            
+        
         # Remove any null bytes or control characters except newlines
         subject = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', '', subject)
         # Replace multiple spaces with single space
         subject = re.sub(r'\s+', ' ', subject)
+        # Clean up any remaining Q-encoded artifacts
+        subject = subject.replace('=?UTF-8?Q?', '')
+        subject = subject.replace('?=', '')
         # Strip leading/trailing whitespace
         subject = subject.strip()
         
