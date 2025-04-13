@@ -45,12 +45,20 @@ EMAIL_PASS = os.getenv('EMAIL_PASS')
 BARD_API_KEY = os.getenv('BARD_API_KEY')
 TOGETHER_API_KEY = os.getenv('TOGETHER_API_KEY')
 HUGGINGFACE_API_KEY = os.getenv('HUGGINGFACE_API_KEY')
+DEEPSEEK_API_KEY = os.getenv('DEEPSEEK_API')
 
 class NewsletterProcessor:
     def __init__(self):
         # Initialize Gemini
         genai.configure(api_key=BARD_API_KEY)
         self.model = genai.GenerativeModel('gemini-pro')
+        
+        # Initialize Google AI Studio API (Gemini 2.0)
+        self.GOOGLE_AI_STUDIO_API = os.getenv('GOOGLE_AI_STUDIO_API')
+        
+        # Initialize DeepSeek API
+        self.DEEPSEEK_API_KEY = os.getenv('DEEPSEEK_API')
+        self.DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
         
         # Initialize Anthropic
         anthropic_api_key = os.getenv('ANTHROPIC_API')
@@ -68,10 +76,14 @@ class NewsletterProcessor:
         self.last_anthropic_call = 0
         self.last_together_call = 0
         self.last_huggingface_call = 0
+        self.last_gemini2_call = 0
+        self.last_deepseek_call = 0
         self.gemini_calls = 0
         self.anthropic_calls = 0
         self.together_calls = 0
         self.huggingface_calls = 0
+        self.gemini2_calls = 0
+        self.deepseek_calls = 0
         self.reset_time = time.time()
         
         # Rate limits
@@ -79,6 +91,7 @@ class NewsletterProcessor:
         self.ANTHROPIC_CALLS_PER_MINUTE = 15
         self.TOGETHER_CALLS_PER_MINUTE = 50
         self.HUGGINGFACE_CALLS_PER_MINUTE = 30
+        self.DEEPSEEK_CALLS_PER_MINUTE = 20
         self.MIN_DELAY_BETWEEN_CALLS = 1
         
         self.system_prompt = """You are an AI trained to analyze newsletters and create engaging, SEO-friendly summaries.
@@ -293,6 +306,8 @@ Focus on creating content that is both informative for readers and optimized for
             self.anthropic_calls = 0
             self.together_calls = 0
             self.huggingface_calls = 0
+            self.gemini2_calls = 0
+            self.deepseek_calls = 0
             self.reset_time = current_time
         
         if api_type == 'gemini':
@@ -310,6 +325,30 @@ Focus on creating content that is both informative for readers and optimized for
             
             self.last_gemini_call = time.time()
             self.gemini_calls += 1
+            
+        elif api_type == 'gemini2':  # Add new rate limiting for Gemini 2.0
+            # Use the same rate limits as Gemini for now
+            # Check if we need to reset the counter
+            if time.time() - self.reset_time > 60:
+                self.gemini2_calls = 0
+                self.reset_time = time.time()
+                
+            # Check if we've exceeded our rate limit
+            if self.gemini2_calls >= self.GEMINI_CALLS_PER_MINUTE:
+                wait_time = 60 - (time.time() - self.reset_time) + 1
+                if wait_time > 0:
+                    logger.info(f"Rate limit reached for Gemini 2.0. Waiting {wait_time:.2f} seconds.")
+                    await asyncio.sleep(wait_time)
+                self.gemini2_calls = 0
+                self.reset_time = time.time()
+                
+            # Check if we need to wait between calls
+            time_since_last_call = time.time() - self.last_gemini2_call
+            if time_since_last_call < self.MIN_DELAY_BETWEEN_CALLS:
+                await asyncio.sleep(self.MIN_DELAY_BETWEEN_CALLS - time_since_last_call)
+                
+            self.last_gemini2_call = time.time()
+            self.gemini2_calls += 1
             
         elif api_type == 'anthropic':
             time_since_last_call = current_time - self.last_anthropic_call
@@ -358,6 +397,22 @@ Focus on creating content that is both informative for readers and optimized for
             
             self.last_huggingface_call = time.time()
             self.huggingface_calls += 1
+
+        elif api_type == 'deepseek':
+            time_since_last_call = current_time - self.last_deepseek_call
+            if time_since_last_call < self.MIN_DELAY_BETWEEN_CALLS:
+                await asyncio.sleep(self.MIN_DELAY_BETWEEN_CALLS - time_since_last_call)
+            
+            if self.deepseek_calls >= self.DEEPSEEK_CALLS_PER_MINUTE:
+                wait_time = 60 - (current_time - self.reset_time)
+                if wait_time > 0:
+                    logger.info(f"Waiting {wait_time:.2f}s for DeepSeek rate limit reset")
+                    await asyncio.sleep(wait_time)
+                self.deepseek_calls = 0
+                self.reset_time = time.time()
+            
+            self.last_deepseek_call = time.time()
+            self.deepseek_calls += 1
 
     async def _retry_with_backoff(self, func, *args, max_retries=3, initial_delay=1):
         """Retry a function with exponential backoff."""
@@ -671,44 +726,169 @@ Content: {text_content}
                 'insights': []
             }
 
+    async def _generate_content_with_gemini2(self, text_content: str, subject: str) -> Dict:
+        """Generate content analysis using Google AI Studio API with Gemini 2.0 model."""
+        try:
+            # Initialize rate limiting tracker if not exists
+            if not hasattr(self, 'gemini2_calls'):
+                self.gemini2_calls = 0
+                self.last_gemini2_call = 0
+            
+            await self._wait_for_rate_limit("gemini2")
+            
+            # Import here to handle potential import errors gracefully
+            try:
+                import google.generativeai as genai_v2
+                
+                # Configure the SDK with the API key
+                genai_v2.configure(api_key=self.GOOGLE_AI_STUDIO_API)
+                
+                # Create a client - note the correct initialization pattern
+                genai_client = genai_v2.GenerativeModel(
+                    model_name="gemini-1.5-flash",
+                    generation_config={"temperature": 0.7, "max_output_tokens": 1500}
+                )
+            except ImportError:
+                logger.error("Failed to import Google GenAI SDK. Make sure it's installed correctly.")
+                return {}
+            
+            # Prepare prompt
+            prompt = f"""
+            Subject: {subject}
+            
+            {self.system_prompt}
+            
+            Content to analyze:
+            {text_content}
+            """
+            
+            # The SDK doesn't have built-in async support, so we need to run it in an executor
+            response = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: genai_client.generate_content(prompt)
+            )
+            
+            # Extract text from response
+            analysis_text = response.text
+            
+            # Parse the response
+            analysis = self._parse_llm_response(analysis_text)
+            self._log_llm_output("Gemini 2.0", analysis)
+            
+            return analysis
+            
+        except Exception as e:
+            logger.error(f"Error generating content with Gemini 2.0: {e}")
+            logger.error(traceback.format_exc())
+            return {}
+
+    async def _generate_content_with_deepseek(self, text_content: str, subject: str) -> Dict:
+        """Generate content using DeepSeek API with rate limiting."""
+        try:
+            await self._wait_for_rate_limit('deepseek')
+            headers = {
+                "Authorization": f"Bearer {self.DEEPSEEK_API_KEY}",
+                "Content-Type": "application/json"
+            }
+            
+            # Format prompt for DeepSeek model
+            messages = [
+                {
+                    "role": "system",
+                    "content": self.system_prompt
+                },
+                {
+                    "role": "user",
+                    "content": f"Subject: {subject}\n\nContent: {text_content}"
+                }
+            ]
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    self.DEEPSEEK_API_URL,
+                    headers=headers,
+                    json={
+                        "model": "deepseek-chat",
+                        "messages": messages,
+                        "temperature": 0.7,
+                        "max_tokens": 1500
+                    }
+                ) as response:
+                    response_text = await response.text()
+                    if response.status != 200:
+                        logger.error(f"DeepSeek API error status {response.status}: {response_text}")
+                        raise Exception(f"DeepSeek API error: {response.status} - {response_text}")
+                    
+                    result = await response.json()
+                    generated_text = result.get('choices', [{}])[0].get('message', {}).get('content', '')
+                    
+                    if generated_text:
+                        analysis = self._parse_llm_response(generated_text)
+                        self._log_llm_output("DeepSeek", analysis)
+                        return analysis
+                    else:
+                        logger.error("DeepSeek API returned empty response")
+                        return None
+            
+        except Exception as e:
+            logger.error(f"DeepSeek API error: {str(e)}")
+            logger.error(traceback.format_exc())
+            return None
+
     async def process_email(self, email_content: str, subject: str) -> Dict:
-        """Process raw email content and extract structured information."""
+        """Process email content to extract information using LLMs."""
+        logger.info(f"Processing email: {subject}")
+        
+        # Extract text content from HTML
         soup = BeautifulSoup(email_content, 'html.parser')
         text_content = self._extract_text_with_structure(soup)
         
-        # Try each API in sequence
-        apis = [
-            ('Gemini', self._generate_content_with_gemini),
-            ('Anthropic', self._generate_content_with_anthropic),
-            ('Together AI', self._generate_content_with_together),
-            ('Hugging Face', self._generate_content_with_huggingface)
-        ]
-        
-        analysis = None
-        for api_name, api_func in apis:
-            try:
-                if analysis is None:
-                    logger.info(f"Attempting analysis with {api_name}...")
-                    analysis = await api_func(text_content, subject)
-                    if analysis:
-                        self._log_llm_output(api_name, analysis)
-                        break
-                    else:
-                        logger.error(f"{api_name} analysis returned None")
-            except Exception as e:
-                logger.error(f"{api_name} API error: {str(e)}")
-        
-        # If all APIs fail, use local fallback
-        if analysis is None:
-            logger.warning("All LLM APIs failed, using local fallback analysis")
+        analysis = {}
+        try:
+            # Try Google AI Studio API (Gemini 2.0) first
+            analysis = await self._generate_content_with_gemini2(text_content, subject)
+            if analysis:
+                return analysis
+            
+            # Try DeepSeek second
+            analysis = await self._generate_content_with_deepseek(text_content, subject)
+            if analysis:
+                return analysis
+                
+            # Try Hugging Face next
+            analysis = await self._generate_content_with_huggingface(text_content, subject)
+            if analysis:
+                return analysis
+                
+            # Try Anthropic Claude next
+            analysis = await self._generate_content_with_anthropic(text_content, subject)
+            if analysis:
+                return analysis
+                
+            # Try Gemini Pro next
+            analysis = await self._generate_content_with_gemini(text_content, subject)
+            if analysis:
+                return analysis
+                
+            # Try Together AI next
+            analysis = await self._generate_content_with_together(text_content, subject)
+            if analysis:
+                return analysis
+                
+            # Fallback to local analysis
             analysis = self._local_fallback_analysis(text_content, subject)
-            self._log_llm_output("Local Fallback", analysis)
-        
-        return {
-            'content': text_content,
-            'analysis': analysis,
-            'processed_at': datetime.now(timezone.utc).isoformat()
-        }
+            return analysis
+            
+        except Exception as e:
+            logger.error(f"Error processing email: {e}")
+            logger.error(traceback.format_exc())
+            return {
+                "summary": f"Error processing email: {str(e)}",
+                "keywords": [],
+                "tags": [],
+                "products": [],
+                "key_insights": []
+            }
 
     def _extract_text_with_structure(self, soup: BeautifulSoup) -> str:
         for element in soup(['script', 'style']):
@@ -821,7 +1001,7 @@ Content: {text_content}
                 return
 
             uuid_val = str(uuid.uuid4())
-            processed_data = await self.process_email(html_content, subject)
+            analysis = await self.process_email(html_content, subject)
             
             # Upload HTML and take screenshots
             html_s3_link = await self.upload_html_and_take_screenshot(html_content, uuid_val)
@@ -842,8 +1022,8 @@ Content: {text_content}
                         brand_id = self.get_or_create_brand(cur, brand_info)
                         logger.info(f"Using brand: {brand_info['name']} (ID: {brand_id})")
 
-                        # Get products link safely
-                        products = processed_data['analysis'].get('products', [])
+                        # Get products link safely - directly from analysis now
+                        products = analysis.get('products', [])
                         products_link = products[0] if products else None
 
                         # Insert newsletter with brand_id
@@ -859,14 +1039,14 @@ Content: {text_content}
                         """, (
                             master_user_id, sender_name, email_date, subject,
                             html_s3_link, full_screenshot_url, top_screenshot_url,
-                            0, 0, datetime.now(timezone.utc), processed_data['analysis'].get('summary'),
+                            0, 0, datetime.now(timezone.utc), analysis.get('summary'),
                             products_link, brand_id
                         ))
                         
                         newsletter_id = cur.fetchone()[0]
 
-                        # Process tags
-                        tags = processed_data['analysis'].get('tags', [])
+                        # Process tags - directly from analysis now
+                        tags = analysis.get('tags', [])
                         if tags:
                             tag_ids = self.get_or_create_tags(tags, conn, cur)
                             for tag_id in tag_ids:
