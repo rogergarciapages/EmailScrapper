@@ -669,8 +669,12 @@ Content: {text_content}
             elif line.startswith('Key Insights:'):
                 current_key = 'insights'
                 result[current_key] = []
-            elif current_key == 'insights' and line.strip().startswith('-'):
-                result[current_key].append(line.strip()[2:])
+            elif current_key == 'insights' and line.strip():
+                # Clean the insight line: remove asterisks, dashes, and leading/trailing whitespace
+                clean_insight = line.strip()
+                clean_insight = re.sub(r'^\s*[\*\-]\s*', '', clean_insight)  # Remove leading * or - and whitespace
+                if clean_insight:  # Only add non-empty insights
+                    result[current_key].append(clean_insight)
             elif current_key and line.strip():
                 if isinstance(result[current_key], list):
                     result[current_key].append(line.strip())
@@ -1025,22 +1029,28 @@ Content: {text_content}
                         # Get products link safely - directly from analysis now
                         products = analysis.get('products', [])
                         products_link = products[0] if products else None
+                        
+                        # Process key insights - join them with commas for database storage
+                        key_insights = analysis.get('insights', [])
+                        key_insights_string = ", ".join(key_insights) if key_insights else None
+                        
+                        logger.info(f"Extracted key insights: {key_insights_string}")
 
-                        # Insert newsletter with brand_id
+                        # Insert newsletter with brand_id and key_insights
                         cur.execute("""
                             INSERT INTO "Newsletter" (
                                 user_id, sender, published_at, subject, html_file_url,
                                 full_screenshot_url, top_screenshot_url,
                                 likes_count, you_rocks_count, created_at,
-                                summary, products_link, brand_id
+                                summary, products_link, brand_id, key_insights
                             ) 
-                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                             RETURNING newsletter_id
                         """, (
                             master_user_id, sender_name, email_date, subject,
                             html_s3_link, full_screenshot_url, top_screenshot_url,
                             0, 0, datetime.now(timezone.utc), analysis.get('summary'),
-                            products_link, brand_id
+                            products_link, brand_id, key_insights_string
                         ))
                         
                         newsletter_id = cur.fetchone()[0]
