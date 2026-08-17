@@ -1,7 +1,6 @@
 aiohttp>=3.9.0
 anthropic>=0.18.0
 beautifulsoup4>=4.12.0
-boto3>=1.34.0
 google-generativeai>=0.4.0
 pillow>=10.2.0
 playwright>=1.42.0

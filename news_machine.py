@@ -10,7 +10,6 @@ from email.header import decode_header, Header
 from email.errors import HeaderParseError
 from datetime import datetime, timezone
 import uuid
-import boto3
 
 import json
 from bs4 import BeautifulSoup
@@ -28,6 +27,7 @@ import anthropic
 from anthropic import AsyncAnthropic
 import aiohttp
 from pprint import pformat
+from supabase import create_client, Client
 
 # Load environment variables
 load_dotenv()
@@ -37,11 +37,20 @@ LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
 logging.basicConfig(level=LOG_LEVEL)
 logger = logging.getLogger(__name__)
 
+# Supabase Storage Configuration
+SUPABASE_URL = os.getenv('SUPABASE_URL') or os.getenv('NEXT_PUBLIC_SUPABASE_URL')
+SUPABASE_KEY = os.getenv('SUPABASE_SERVICE_ROLE_KEY') or os.getenv('SUPABASE_KEY') or os.getenv('NEXT_PUBLIC_SUPABASE_ANON_KEY')
+SUPABASE_BUCKET = os.getenv('SUPABASE_STORAGE_BUCKET') or 'newsletters'
+
+supabase_client: Optional[Client] = None
+if SUPABASE_URL and SUPABASE_KEY:
+    try:
+        supabase_client = create_client(SUPABASE_URL, SUPABASE_KEY)
+        logger.info(f"Initialized Supabase client targeting bucket: '{SUPABASE_BUCKET}'")
+    except Exception as _sb_err:
+        logger.error(f"Error initializing Supabase client: {_sb_err}")
+
 # Environment variables
-AWS_ACCESS_KEY_ID = os.getenv('AWS_ACCESS_KEY_ID')
-AWS_SECRET_ACCESS_KEY = os.getenv('AWS_SECRET_ACCESS_KEY')
-S3_BUCKET = os.getenv('AWS_S3_BUCKET_NAME')
-S3_REGION = os.getenv('AWS_REGION', 'eu-central-1')
 EMAIL_USER = os.getenv('EMAIL_USER')
 EMAIL_PASS = os.getenv('EMAIL_PASS')
 IMAP_SERVER = os.getenv('EMAIL_IMAP_SERVER') or os.getenv('IMAP_SERVER') or 'imap.buzondecorreo.com'
@@ -196,21 +205,45 @@ Focus on creating content that is both informative for readers and optimized for
             logger.error(f"Error converting image to WebP: {e}")
             traceback.print_exc()
 
-    async def upload_to_s3(self, image_path, uuid_val):
-        try:
-            s3 = boto3.client('s3',
-                            aws_access_key_id=AWS_ACCESS_KEY_ID,
-                            aws_secret_access_key=AWS_SECRET_ACCESS_KEY)
-            key = os.path.basename(image_path)
-            with open(image_path, 'rb') as f:
-                s3.put_object(Body=f, Bucket=S3_BUCKET, Key=f"{uuid_val}/{key}", ContentType='image/webp')
-            os.remove(image_path)
-            logger.info("Local image file deleted after uploading to S3")
-        except Exception as e:
-            logger.error(f"Error uploading image to S3: {e}")
-            traceback.print_exc()
+    async def upload_to_supabase_storage(self, file_path: str, uuid_val: str, content_type: str = "image/webp") -> str:
+        """Upload a file to Supabase Storage bucket and return its public URL."""
+        filename = os.path.basename(file_path)
+        storage_path = f"{uuid_val}/{filename}"
 
-    async def take_screenshot(self, html_content, uuid_val):
+        if not supabase_client:
+            logger.error("Supabase client is not initialized. Please verify SUPABASE_URL and SUPABASE_KEY.")
+            return f"{SUPABASE_URL}/storage/v1/object/public/{SUPABASE_BUCKET}/{storage_path}"
+
+        try:
+            with open(file_path, 'rb') as f:
+                file_bytes = f.read()
+
+            supabase_client.storage.from_(SUPABASE_BUCKET).upload(
+                file=file_bytes,
+                path=storage_path,
+                file_options={"content-type": content_type, "upsert": "true"}
+            )
+            
+            public_url = supabase_client.storage.from_(SUPABASE_BUCKET).get_public_url(storage_path)
+            logger.info(f"Uploaded to Supabase Storage: {public_url}")
+
+            if os.path.exists(file_path):
+                os.remove(file_path)
+                logger.info(f"Deleted local temporary file: {file_path}")
+
+            return public_url
+        except Exception as e:
+            logger.error(f"Error uploading {file_path} to Supabase Storage: {e}")
+            traceback.print_exc()
+            if os.path.exists(file_path):
+                try:
+                    os.remove(file_path)
+                except Exception:
+                    pass
+            return f"{SUPABASE_URL}/storage/v1/object/public/{SUPABASE_BUCKET}/{storage_path}"
+
+    async def take_screenshot(self, html_content: str, uuid_val: str) -> Dict[str, str]:
+        """Generate full and thumbnail screenshots, convert to WebP, and upload to Supabase Storage."""
         async with async_playwright() as p:
             browser = await p.chromium.launch(
                 headless=True,
@@ -218,6 +251,9 @@ Focus on creating content that is both informative for readers and optimized for
             )
             page = await browser.new_page()
             page.set_default_timeout(60000)
+
+            full_url = ""
+            top_url = ""
 
             try:
                 await page.goto("about:blank")
@@ -236,8 +272,12 @@ Focus on creating content that is both informative for readers and optimized for
 
                 await self.convert_to_webp(full_screenshot_path)
                 await self.convert_to_webp(thumb_screenshot_path)
-                await self.upload_to_s3(full_screenshot_path.replace(".png", ".webp"), uuid_val)
-                await self.upload_to_s3(thumb_screenshot_path.replace(".png", ".webp"), uuid_val)
+
+                full_webp_path = full_screenshot_path.replace(".png", ".webp")
+                thumb_webp_path = thumb_screenshot_path.replace(".png", ".webp")
+
+                full_url = await self.upload_to_supabase_storage(full_webp_path, uuid_val, content_type="image/webp")
+                top_url = await self.upload_to_supabase_storage(thumb_webp_path, uuid_val, content_type="image/webp")
 
             except Exception as e:
                 logger.error(f"Error taking screenshots: {e}")
@@ -248,28 +288,40 @@ Focus on creating content that is both informative for readers and optimized for
                 if browser:
                     await browser.close()
 
-    async def upload_html_and_take_screenshot(self, html_content, uuid_val):
+            return {
+                'full_screenshot_url': full_url or f"{SUPABASE_URL}/storage/v1/object/public/{SUPABASE_BUCKET}/{uuid_val}/{uuid_val}_full.webp",
+                'top_screenshot_url': top_url or f"{SUPABASE_URL}/storage/v1/object/public/{SUPABASE_BUCKET}/{uuid_val}/{uuid_val}_small.webp"
+            }
+
+    async def upload_html_and_take_screenshot(self, html_content: str, uuid_val: str) -> Dict[str, str]:
+        """Save HTML, upload to Supabase Storage, and trigger Playwright screenshots."""
         html_file_path = f"{uuid_val}.html"
         with open(html_file_path, 'w', encoding='utf-8') as file:
             file.write(html_content)
 
         try:
-            s3 = boto3.client('s3',
-                            aws_access_key_id=AWS_ACCESS_KEY_ID,
-                            aws_secret_access_key=AWS_SECRET_ACCESS_KEY)
-            s3.put_object(Body=html_content.encode(), Bucket=S3_BUCKET, Key=f"{uuid_val}/{uuid_val}.html", ContentType='text/html')
-            html_s3_link = f"https://{S3_BUCKET}.s3.{S3_REGION}.amazonaws.com/{uuid_val}/{uuid_val}.html"
+            html_public_url = await self.upload_to_supabase_storage(html_file_path, uuid_val, content_type="text/html")
+            screenshot_assets = await self.take_screenshot(html_content, uuid_val)
 
-            await self.take_screenshot(html_content, uuid_val)
-            
-            os.remove(html_file_path)
-            logger.info(f"Local HTML file deleted after uploading to S3 and taking screenshot: {html_file_path}")
-
-            return html_s3_link
+            return {
+                'html_url': html_public_url,
+                'full_screenshot_url': screenshot_assets.get('full_screenshot_url', ''),
+                'top_screenshot_url': screenshot_assets.get('top_screenshot_url', '')
+            }
 
         except Exception as e:
-            logger.error(f"Error uploading HTML to S3 or taking screenshot: {e}")
+            logger.error(f"Error uploading HTML or taking screenshots: {e}")
             traceback.print_exc()
+            if os.path.exists(html_file_path):
+                try:
+                    os.remove(html_file_path)
+                except Exception:
+                    pass
+            return {
+                'html_url': f"{SUPABASE_URL}/storage/v1/object/public/{SUPABASE_BUCKET}/{uuid_val}/{uuid_val}.html",
+                'full_screenshot_url': f"{SUPABASE_URL}/storage/v1/object/public/{SUPABASE_BUCKET}/{uuid_val}/{uuid_val}_full.webp",
+                'top_screenshot_url': f"{SUPABASE_URL}/storage/v1/object/public/{SUPABASE_BUCKET}/{uuid_val}/{uuid_val}_small.webp"
+            }
 
     def create_tag_slug(self, tag_name: str) -> str:
         slug = tag_name.lower()
@@ -1109,10 +1161,11 @@ Content: {text_content}
             uuid_val = str(uuid.uuid4())
             analysis = await self.process_email(html_content, subject)
             
-            # Upload HTML and take screenshots
-            html_s3_link = await self.upload_html_and_take_screenshot(html_content, uuid_val)
-            full_screenshot_url = f'https://{S3_BUCKET}.s3.{S3_REGION}.amazonaws.com/{uuid_val}/{uuid_val}_full.webp'
-            top_screenshot_url = f'https://{S3_BUCKET}.s3.{S3_REGION}.amazonaws.com/{uuid_val}/{uuid_val}_small.webp'
+            # Upload HTML and take screenshots to Supabase Storage
+            storage_assets = await self.upload_html_and_take_screenshot(html_content, uuid_val)
+            html_s3_link = storage_assets.get('html_url')
+            full_screenshot_url = storage_assets.get('full_screenshot_url')
+            top_screenshot_url = storage_assets.get('top_screenshot_url')
 
             # Parse email date
             email_date = dateutil_parser.parse(email_msg['Date']) if email_msg['Date'] else datetime.now(timezone.utc)
