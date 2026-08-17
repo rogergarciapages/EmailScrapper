@@ -212,7 +212,10 @@ Focus on creating content that is both informative for readers and optimized for
 
     async def take_screenshot(self, html_content, uuid_val):
         async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
+            browser = await p.chromium.launch(
+                headless=True,
+                args=['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
+            )
             page = await browser.new_page()
             page.set_default_timeout(60000)
 
