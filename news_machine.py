@@ -16,15 +16,12 @@ from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright
 from PIL import Image
 from dotenv import load_dotenv
-import google.generativeai as genai
 import time
 import psycopg2
 from psycopg2.extras import DictCursor
 from urllib.parse import urlparse, unquote
 from dateutil import parser as dateutil_parser
 from typing import Dict, List, Optional
-import anthropic
-from anthropic import AsyncAnthropic
 import aiohttp
 from pprint import pformat
 from supabase import create_client, Client
@@ -55,64 +52,21 @@ EMAIL_USER = os.getenv('EMAIL_USER')
 EMAIL_PASS = os.getenv('EMAIL_PASS')
 IMAP_SERVER = os.getenv('EMAIL_IMAP_SERVER') or os.getenv('IMAP_SERVER') or 'imap.buzondecorreo.com'
 IMAP_PORT = int(os.getenv('EMAIL_IMAP_PORT') or os.getenv('IMAP_PORT') or 993)
-BARD_API_KEY = os.getenv('BARD_API_KEY')
-TOGETHER_API_KEY = os.getenv('TOGETHER_API_KEY')
-HUGGINGFACE_API_KEY = os.getenv('HUGGINGFACE_API_KEY')
-DEEPSEEK_API_KEY = os.getenv('DEEPSEEK_API')
 OPENROUTER_API_KEY = os.getenv('OPENROUTER_API_KEY')
 
 class NewsletterProcessor:
     def __init__(self):
-        # Initialize Gemini
-        genai.configure(api_key=BARD_API_KEY)
-        self.model = genai.GenerativeModel('gemini-pro')
-        
-        # Initialize Google AI Studio API (Gemini 2.0)
-        self.GOOGLE_AI_STUDIO_API = os.getenv('GOOGLE_AI_STUDIO_API')
-        
-        # Initialize DeepSeek API
-        self.DEEPSEEK_API_KEY = os.getenv('DEEPSEEK_API')
-        self.DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
-        
-        # Initialize Anthropic
-        anthropic_api_key = os.getenv('ANTHROPIC_API')
-        self.anthropic = AsyncAnthropic(api_key=anthropic_api_key)
-        
-        # Initialize Together AI settings
-        self.TOGETHER_API_URL = "https://api.together.xyz/inference"
-        self.TOGETHER_MODEL = "mistralai/Mixtral-8x7B-Instruct-v0.1"
-        
         # Initialize OpenRouter API
         self.OPENROUTER_API_KEY = os.getenv('OPENROUTER_API_KEY')
         self.OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
         self.OPENROUTER_MODEL = os.getenv('OPENROUTER_MODEL', 'google/gemini-2.0-flash-001')
         
-        # Initialize Hugging Face settings
-        self.HUGGINGFACE_API_URL = "https://api-inference.huggingface.co/models/mistralai/Mixtral-8x7B-Instruct-v0.1"
-        
         # Rate limiting setup
-        self.last_gemini_call = 0
-        self.last_anthropic_call = 0
-        self.last_together_call = 0
-        self.last_huggingface_call = 0
-        self.last_gemini2_call = 0
-        self.last_deepseek_call = 0
         self.last_openrouter_call = 0
-        self.gemini_calls = 0
-        self.anthropic_calls = 0
-        self.together_calls = 0
-        self.huggingface_calls = 0
-        self.gemini2_calls = 0
-        self.deepseek_calls = 0
         self.openrouter_calls = 0
         self.reset_time = time.time()
         
         # Rate limits
-        self.GEMINI_CALLS_PER_MINUTE = 50
-        self.ANTHROPIC_CALLS_PER_MINUTE = 15
-        self.TOGETHER_CALLS_PER_MINUTE = 50
-        self.HUGGINGFACE_CALLS_PER_MINUTE = 30
-        self.DEEPSEEK_CALLS_PER_MINUTE = 20
         self.OPENROUTER_CALLS_PER_MINUTE = 50
         self.MIN_DELAY_BETWEEN_CALLS = 1
         
@@ -373,140 +327,28 @@ Focus on creating content that is both informative for readers and optimized for
                 
         return tag_ids
 
-    async def _wait_for_rate_limit(self, api_type: str) -> None:
-        """Wait if necessary to respect rate limits."""
+    async def _wait_for_rate_limit(self, api_type: str = 'openrouter') -> None:
+        """Wait if necessary to respect OpenRouter rate limits."""
         current_time = time.time()
         
         if current_time - self.reset_time >= 60:
-            self.gemini_calls = 0
-            self.anthropic_calls = 0
-            self.together_calls = 0
-            self.huggingface_calls = 0
-            self.gemini2_calls = 0
-            self.deepseek_calls = 0
             self.openrouter_calls = 0
             self.reset_time = current_time
         
-        if api_type == 'openrouter':
-            time_since_last_call = current_time - self.last_openrouter_call
-            if time_since_last_call < self.MIN_DELAY_BETWEEN_CALLS:
-                await asyncio.sleep(self.MIN_DELAY_BETWEEN_CALLS - time_since_last_call)
-            
-            if self.openrouter_calls >= self.OPENROUTER_CALLS_PER_MINUTE:
-                wait_time = 60 - (current_time - self.reset_time)
-                if wait_time > 0:
-                    logger.info(f"Waiting {wait_time:.2f}s for OpenRouter rate limit reset")
-                    await asyncio.sleep(wait_time)
-                self.openrouter_calls = 0
-                self.reset_time = time.time()
-            
-            self.last_openrouter_call = time.time()
-            self.openrouter_calls += 1
-            
-        elif api_type == 'gemini':
-
-            time_since_last_call = current_time - self.last_gemini_call
-            if time_since_last_call < self.MIN_DELAY_BETWEEN_CALLS:
-                await asyncio.sleep(self.MIN_DELAY_BETWEEN_CALLS - time_since_last_call)
-            
-            if self.gemini_calls >= self.GEMINI_CALLS_PER_MINUTE:
-                wait_time = 60 - (current_time - self.reset_time)
-                if wait_time > 0:
-                    logger.info(f"Waiting {wait_time:.2f}s for Gemini rate limit reset")
-                    await asyncio.sleep(wait_time)
-                self.gemini_calls = 0
-                self.reset_time = time.time()
-            
-            self.last_gemini_call = time.time()
-            self.gemini_calls += 1
-            
-        elif api_type == 'gemini2':  # Add new rate limiting for Gemini 2.0
-            # Use the same rate limits as Gemini for now
-            # Check if we need to reset the counter
-            if time.time() - self.reset_time > 60:
-                self.gemini2_calls = 0
-                self.reset_time = time.time()
-                
-            # Check if we've exceeded our rate limit
-            if self.gemini2_calls >= self.GEMINI_CALLS_PER_MINUTE:
-                wait_time = 60 - (time.time() - self.reset_time) + 1
-                if wait_time > 0:
-                    logger.info(f"Rate limit reached for Gemini 2.0. Waiting {wait_time:.2f} seconds.")
-                    await asyncio.sleep(wait_time)
-                self.gemini2_calls = 0
-                self.reset_time = time.time()
-                
-            # Check if we need to wait between calls
-            time_since_last_call = time.time() - self.last_gemini2_call
-            if time_since_last_call < self.MIN_DELAY_BETWEEN_CALLS:
-                await asyncio.sleep(self.MIN_DELAY_BETWEEN_CALLS - time_since_last_call)
-                
-            self.last_gemini2_call = time.time()
-            self.gemini2_calls += 1
-            
-        elif api_type == 'anthropic':
-            time_since_last_call = current_time - self.last_anthropic_call
-            if time_since_last_call < self.MIN_DELAY_BETWEEN_CALLS:
-                await asyncio.sleep(self.MIN_DELAY_BETWEEN_CALLS - time_since_last_call)
-            
-            if self.anthropic_calls >= self.ANTHROPIC_CALLS_PER_MINUTE:
-                wait_time = 60 - (current_time - self.reset_time)
-                if wait_time > 0:
-                    logger.info(f"Waiting {wait_time:.2f}s for Anthropic rate limit reset")
-                    await asyncio.sleep(wait_time)
-                self.anthropic_calls = 0
-                self.reset_time = time.time()
-            
-            self.last_anthropic_call = time.time()
-            self.anthropic_calls += 1
-            
-        elif api_type == 'together':
-            time_since_last_call = current_time - self.last_together_call
-            if time_since_last_call < self.MIN_DELAY_BETWEEN_CALLS:
-                await asyncio.sleep(self.MIN_DELAY_BETWEEN_CALLS - time_since_last_call)
-            
-            if self.together_calls >= self.TOGETHER_CALLS_PER_MINUTE:
-                wait_time = 60 - (current_time - self.reset_time)
-                if wait_time > 0:
-                    logger.info(f"Waiting {wait_time:.2f}s for Together AI rate limit reset")
-                    await asyncio.sleep(wait_time)
-                self.together_calls = 0
-                self.reset_time = time.time()
-            
-            self.last_together_call = time.time()
-            self.together_calls += 1
+        time_since_last_call = current_time - self.last_openrouter_call
+        if time_since_last_call < self.MIN_DELAY_BETWEEN_CALLS:
+            await asyncio.sleep(self.MIN_DELAY_BETWEEN_CALLS - time_since_last_call)
         
-        elif api_type == 'huggingface':
-            time_since_last_call = current_time - self.last_huggingface_call
-            if time_since_last_call < self.MIN_DELAY_BETWEEN_CALLS:
-                await asyncio.sleep(self.MIN_DELAY_BETWEEN_CALLS - time_since_last_call)
-            
-            if self.huggingface_calls >= self.HUGGINGFACE_CALLS_PER_MINUTE:
-                wait_time = 60 - (current_time - self.reset_time)
-                if wait_time > 0:
-                    logger.info(f"Waiting {wait_time:.2f}s for Hugging Face rate limit reset")
-                    await asyncio.sleep(wait_time)
-                self.huggingface_calls = 0
-                self.reset_time = time.time()
-            
-            self.last_huggingface_call = time.time()
-            self.huggingface_calls += 1
-
-        elif api_type == 'deepseek':
-            time_since_last_call = current_time - self.last_deepseek_call
-            if time_since_last_call < self.MIN_DELAY_BETWEEN_CALLS:
-                await asyncio.sleep(self.MIN_DELAY_BETWEEN_CALLS - time_since_last_call)
-            
-            if self.deepseek_calls >= self.DEEPSEEK_CALLS_PER_MINUTE:
-                wait_time = 60 - (current_time - self.reset_time)
-                if wait_time > 0:
-                    logger.info(f"Waiting {wait_time:.2f}s for DeepSeek rate limit reset")
-                    await asyncio.sleep(wait_time)
-                self.deepseek_calls = 0
-                self.reset_time = time.time()
-            
-            self.last_deepseek_call = time.time()
-            self.deepseek_calls += 1
+        if self.openrouter_calls >= self.OPENROUTER_CALLS_PER_MINUTE:
+            wait_time = 60 - (current_time - self.reset_time)
+            if wait_time > 0:
+                logger.info(f"Waiting {wait_time:.2f}s for OpenRouter rate limit reset")
+                await asyncio.sleep(wait_time)
+            self.openrouter_calls = 0
+            self.reset_time = time.time()
+        
+        self.last_openrouter_call = time.time()
+        self.openrouter_calls += 1
 
     async def _retry_with_backoff(self, func, *args, max_retries=3, initial_delay=1):
         """Retry a function with exponential backoff."""
@@ -532,197 +374,6 @@ Focus on creating content that is both informative for readers and optimized for
                 else:
                     logger.error(f"Failed after {max_retries} attempts: {str(e)}")
                     raise last_exception
-
-    async def _generate_content_with_gemini(self, text_content: str, subject: str) -> Dict:
-        """Generate content using Gemini API with rate limiting."""
-        try:
-            await self._wait_for_rate_limit('gemini')
-            response = await self.model.generate_content_async(
-                f"Subject: {subject}\n\nContent: {text_content}\n\n{self.system_prompt}"
-            )
-            
-            # Parse the response
-            lines = response.text.split('\n')
-            result = {}
-            current_key = None
-            
-            for line in lines:
-                if line.startswith('Summary:'):
-                    current_key = 'summary'
-                    result[current_key] = line.replace('Summary:', '').strip()
-                elif line.startswith('Keywords:'):
-                    current_key = 'keywords'
-                    keywords_text = line.replace('Keywords:', '').strip()
-                    result[current_key] = [kw.strip() for kw in keywords_text.split(',')]
-                elif line.startswith('Tags:'):
-                    current_key = 'tags'
-                    tags_text = line.replace('Tags:', '').strip()
-                    result[current_key] = [tag.strip() for tag in tags_text.split(',')]
-                elif line.startswith('Products:'):
-                    current_key = 'products'
-                    products_text = line.replace('Products:', '').strip()
-                    result[current_key] = [prod.strip() for prod in products_text.split(',')]
-                elif line.startswith('Key Insights:'):
-                    current_key = 'insights'
-                    result[current_key] = []
-                elif current_key == 'insights' and line.strip().startswith('-'):
-                    result[current_key].append(line.strip()[2:])
-                elif current_key and line.strip():
-                    if isinstance(result[current_key], list):
-                        result[current_key].append(line.strip())
-                    else:
-                        result[current_key] += ' ' + line.strip()
-            
-            return result
-            
-        except Exception as e:
-            logger.error(f"Gemini API error: {e}")
-            return None
-
-    async def _generate_content_with_anthropic(self, text_content: str, subject: str) -> Dict:
-        """Generate content using Anthropic API with rate limiting."""
-        try:
-            await self._wait_for_rate_limit('anthropic')
-            message = await self.anthropic.messages.create(
-                model="claude-3-opus-20240229",
-                max_tokens=1500,  # Increased for longer summaries
-                messages=[{
-                    "role": "user",
-                    "content": f"Subject: {subject}\n\nContent: {text_content}\n\n{self.system_prompt}"
-                }]
-            )
-            
-            # Parse the response
-            lines = message.content[0].text.split('\n')
-            result = {}
-            current_key = None
-            
-            for line in lines:
-                if line.startswith('Summary:'):
-                    current_key = 'summary'
-                    result[current_key] = line.replace('Summary:', '').strip()
-                elif line.startswith('Keywords:'):
-                    current_key = 'keywords'
-                    keywords_text = line.replace('Keywords:', '').strip()
-                    result[current_key] = [kw.strip() for kw in keywords_text.split(',')]
-                elif line.startswith('Tags:'):
-                    current_key = 'tags'
-                    tags_text = line.replace('Tags:', '').strip()
-                    result[current_key] = [tag.strip() for tag in tags_text.split(',')]
-                elif line.startswith('Products:'):
-                    current_key = 'products'
-                    products_text = line.replace('Products:', '').strip()
-                    result[current_key] = [prod.strip() for prod in products_text.split(',')]
-                elif line.startswith('Key Insights:'):
-                    current_key = 'insights'
-                    result[current_key] = []
-                elif current_key == 'insights' and line.strip().startswith('-'):
-                    result[current_key].append(line.strip()[2:])
-                elif current_key and line.strip():
-                    if isinstance(result[current_key], list):
-                        result[current_key].append(line.strip())
-                    else:
-                        result[current_key] += ' ' + line.strip()
-            
-            return result
-            
-        except Exception as e:
-            logger.error(f"Anthropic API error: {e}")
-            return None
-
-    async def _generate_content_with_together(self, text_content: str, subject: str) -> Dict:
-        """Generate content using Together AI API with rate limiting."""
-        try:
-            await self._wait_for_rate_limit('together')
-            headers = {
-                "Authorization": f"Bearer {TOGETHER_API_KEY}",
-                "Content-Type": "application/json"
-            }
-            
-            # Format prompt for Mixtral model
-            prompt = f"""<s>[INST] Here's a newsletter to analyze:
-
-Subject: {subject}
-
-Content: {text_content}
-
-{self.system_prompt}[/INST]</s>"""
-            
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    self.TOGETHER_API_URL,
-                    headers=headers,
-                    json={
-                        "model": self.TOGETHER_MODEL,
-                        "prompt": prompt,
-                        "max_tokens": 1500,  # Increased for longer summaries
-                        "temperature": 0.7,
-                        "top_p": 0.7,
-                        "top_k": 50,
-                        "repetition_penalty": 1.1
-                    }
-                ) as response:
-                    if response.status != 200:
-                        raise Exception(f"Together AI API error: {response.status}")
-                    result = await response.json()
-                    return self._parse_llm_response(result['output']['choices'][0]['text'])
-            
-        except Exception as e:
-            logger.error(f"Together AI API error: {e}")
-            return None
-
-    async def _generate_content_with_huggingface(self, text_content: str, subject: str) -> Dict:
-        """Generate content using Hugging Face API with rate limiting."""
-        try:
-            await self._wait_for_rate_limit('huggingface')
-            headers = {
-                "Authorization": f"Bearer {HUGGINGFACE_API_KEY}",
-                "Content-Type": "application/json"
-            }
-            
-            # Format prompt for Mixtral model
-            prompt = f"""<s>[INST] Here's a newsletter to analyze:
-
-Subject: {subject}
-
-Content: {text_content}
-
-{self.system_prompt}[/INST]</s>"""
-            
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    self.HUGGINGFACE_API_URL,
-                    headers=headers,
-                    json={
-                        "inputs": prompt,
-                        "parameters": {
-                            "max_new_tokens": 1500,
-                            "temperature": 0.7,
-                            "top_p": 0.9,
-                            "return_full_text": False
-                        }
-                    }
-                ) as response:
-                    response_text = await response.text()
-                    if response.status != 200:
-                        logger.error(f"Hugging Face API error status {response.status}: {response_text}")
-                        raise Exception(f"Hugging Face API error: {response.status} - {response_text}")
-                    
-                    result = await response.json()
-                    if isinstance(result, list) and len(result) > 0:
-                        generated_text = result[0].get('generated_text', '')
-                        if generated_text:
-                            return self._parse_llm_response(generated_text)
-                        else:
-                            logger.error("Hugging Face API returned empty response")
-                            return None
-                    else:
-                        logger.error(f"Unexpected Hugging Face API response format: {result}")
-                        return None
-            
-        except Exception as e:
-            logger.error(f"Hugging Face API error: {str(e)}")
-            return None
 
     def _parse_llm_response(self, text: str) -> Dict:
         """Parse LLM response into structured format."""
@@ -880,57 +531,6 @@ Content: {text_content}
             logger.error(traceback.format_exc())
             return {}
 
-    async def _generate_content_with_deepseek(self, text_content: str, subject: str) -> Dict:
-        """Generate content using DeepSeek API with rate limiting."""
-        try:
-            await self._wait_for_rate_limit('deepseek')
-            headers = {
-                "Authorization": f"Bearer {self.DEEPSEEK_API_KEY}",
-                "Content-Type": "application/json"
-            }
-            
-            # Format prompt for DeepSeek model
-            messages = [
-                {
-                    "role": "system",
-                    "content": self.system_prompt
-                },
-                {
-                    "role": "user",
-                    "content": f"Subject: {subject}\n\nContent: {text_content}"
-                }
-            ]
-            
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    self.DEEPSEEK_API_URL,
-                    headers=headers,
-                    json={
-                        "model": "deepseek-chat",
-                        "messages": messages,
-                        "temperature": 0.7,
-                        "max_tokens": 1500
-                    }
-                ) as response:
-                    response_text = await response.text()
-                    if response.status != 200:
-                        logger.error(f"DeepSeek API error status {response.status}: {response_text}")
-                        raise Exception(f"DeepSeek API error: {response.status} - {response_text}")
-                    
-                    result = await response.json()
-                    generated_text = result.get('choices', [{}])[0].get('message', {}).get('content', '')
-                    
-                    if generated_text:
-                        analysis = self._parse_llm_response(generated_text)
-                        self._log_llm_output("DeepSeek", analysis)
-                        return analysis
-                    else:
-                        logger.error("DeepSeek API returned empty response")
-                        return None
-            
-        except Exception as e:
-            logger.error(f"DeepSeek API error: {str(e)}")
-            logger.error(traceback.format_exc())
     async def _generate_content_with_openrouter(self, text_content: str, subject: str) -> Optional[Dict]:
         """Generate content using OpenRouter API with rate limiting."""
         if not self.OPENROUTER_API_KEY:
@@ -989,53 +589,21 @@ Content: {text_content}
             return None
 
     async def process_email(self, email_content: str, subject: str) -> Dict:
-        """Process email content to extract information using LLMs."""
-        logger.info(f"Processing email: {subject}")
+        """Process email content to extract summary and metadata using OpenRouter."""
+        logger.info(f"Processing email with OpenRouter: {subject}")
         
         # Extract text content from HTML
         soup = BeautifulSoup(email_content, 'html.parser')
         text_content = self._extract_text_with_structure(soup)
         
-        analysis = {}
         try:
-            # Try OpenRouter API first if available
             analysis = await self._generate_content_with_openrouter(text_content, subject)
             if analysis:
                 return analysis
 
-            # Try Google AI Studio API (Gemini 2.0) second
-            analysis = await self._generate_content_with_gemini2(text_content, subject)
-            if analysis:
-                return analysis
-            
-            # Try DeepSeek second
-            analysis = await self._generate_content_with_deepseek(text_content, subject)
-            if analysis:
-                return analysis
-                
-            # Try Hugging Face next
-            analysis = await self._generate_content_with_huggingface(text_content, subject)
-            if analysis:
-                return analysis
-                
-            # Try Anthropic Claude next
-            analysis = await self._generate_content_with_anthropic(text_content, subject)
-            if analysis:
-                return analysis
-                
-            # Try Gemini Pro next
-            analysis = await self._generate_content_with_gemini(text_content, subject)
-            if analysis:
-                return analysis
-                
-            # Try Together AI next
-            analysis = await self._generate_content_with_together(text_content, subject)
-            if analysis:
-                return analysis
-                
-            # Fallback to local analysis
-            analysis = self._local_fallback_analysis(text_content, subject)
-            return analysis
+            # Fallback to local heuristic analysis if OpenRouter fails
+            logger.warning("OpenRouter analysis returned empty, using local fallback analysis")
+            return self._local_fallback_analysis(text_content, subject)
             
         except Exception as e:
             logger.error(f"Error processing email: {e}")
@@ -1045,7 +613,7 @@ Content: {text_content}
                 "keywords": [],
                 "tags": [],
                 "products": [],
-                "key_insights": []
+                "insights": []
             }
 
     def _extract_text_with_structure(self, soup: BeautifulSoup) -> str:
