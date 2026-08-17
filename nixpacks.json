@@ -3,17 +3,20 @@
   "nixPkgs": [
     "chromium"
   ],
+  "variables": {
+    "PATH": "/opt/venv/bin:$PATH"
+  },
   "phases": {
     "install": {
       "cmds": [
         "python -m venv /opt/venv",
-        ". /opt/venv/bin/activate",
-        "pip install -r requirements.txt",
-        "playwright install chromium"
+        "/opt/venv/bin/pip install --upgrade pip",
+        "/opt/venv/bin/pip install -r requirements.txt",
+        "/opt/venv/bin/playwright install chromium"
       ]
     }
   },
   "start": {
-    "cmd": "python news_machine.py"
+    "cmd": "/opt/venv/bin/python news_machine.py"
   }
 }
