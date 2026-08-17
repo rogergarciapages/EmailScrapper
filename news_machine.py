@@ -1225,10 +1225,13 @@ Content: {text_content}
             raise
 
     async def main(self):
+        run_once = os.getenv('RUN_ONCE', 'false').lower() in ('true', '1', 't', 'yes')
         while True:
             mail = self.connect_to_imap()
             if not mail:
                 logger.error("Failed to connect to IMAP server. Retrying in 60 seconds...")
+                if run_once:
+                    break
                 await asyncio.sleep(60)
                 continue
 
@@ -1262,6 +1265,10 @@ Content: {text_content}
                     mail.logout()
                 except Exception as e:
                     logger.error(f"Error logging out from IMAP: {e}")
+
+            if run_once:
+                logger.info("Single run completed. Exiting.")
+                break
 
             logger.info("Waiting 60 seconds before next check...")
             await asyncio.sleep(60)
