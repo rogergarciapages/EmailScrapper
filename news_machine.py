@@ -836,13 +836,16 @@ Focus on creating content that is both informative for readers and optimized for
 
     async def main(self):
         run_once = os.getenv('RUN_ONCE', 'false').lower() in ('true', '1', 't', 'yes')
+        check_interval = int(os.getenv('CHECK_INTERVAL', '120'))
+
+        logger.info(f"Starting Newsletter Processor (RUN_ONCE={run_once}, CHECK_INTERVAL={check_interval}s)...")
         while True:
             mail = self.connect_to_imap()
             if not mail:
-                logger.error("Failed to connect to IMAP server. Retrying in 60 seconds...")
+                logger.error(f"Failed to connect to IMAP server. Retrying in {check_interval} seconds...")
                 if run_once:
                     break
-                await asyncio.sleep(60)
+                await asyncio.sleep(check_interval)
                 continue
 
             try:
@@ -880,8 +883,8 @@ Focus on creating content that is both informative for readers and optimized for
                 logger.info("Single run completed. Exiting.")
                 break
 
-            logger.info("Waiting 60 seconds before next check...")
-            await asyncio.sleep(60)
+            logger.info(f"Waiting {check_interval} seconds before next check...")
+            await asyncio.sleep(check_interval)
 
     def create_brand_slug(self, text: str) -> str:
         """Create a URL-friendly slug from text."""
