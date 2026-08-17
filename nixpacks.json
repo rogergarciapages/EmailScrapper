@@ -3,9 +3,6 @@
   "nixPkgs": [
     "chromium"
   ],
-  "variables": {
-    "PATH": "/opt/venv/bin:$PATH"
-  },
   "phases": {
     "install": {
       "cmds": [
