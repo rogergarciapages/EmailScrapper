@@ -19,7 +19,7 @@ import google.generativeai as genai
 import time
 import psycopg2
 from psycopg2.extras import DictCursor
-from urllib.parse import urlparse
+from urllib.parse import urlparse, unquote
 from dateutil import parser as dateutil_parser
 from typing import Dict, List, Optional
 import anthropic
@@ -42,6 +42,8 @@ S3_BUCKET = os.getenv('AWS_S3_BUCKET_NAME')
 S3_REGION = os.getenv('AWS_REGION', 'eu-central-1')
 EMAIL_USER = os.getenv('EMAIL_USER')
 EMAIL_PASS = os.getenv('EMAIL_PASS')
+IMAP_SERVER = os.getenv('EMAIL_IMAP_SERVER') or os.getenv('IMAP_SERVER') or 'imap.buzondecorreo.com'
+IMAP_PORT = int(os.getenv('EMAIL_IMAP_PORT') or os.getenv('IMAP_PORT') or 993)
 BARD_API_KEY = os.getenv('BARD_API_KEY')
 TOGETHER_API_KEY = os.getenv('TOGETHER_API_KEY')
 HUGGINGFACE_API_KEY = os.getenv('HUGGINGFACE_API_KEY')
@@ -118,17 +120,18 @@ Key Insights: [Bullet points of key takeaways]
 Focus on creating content that is both informative for readers and optimized for search engines."""
 
     def get_db_config(self):
-        db_url = os.getenv('DIRECT_DATABASE_URL')
+        db_url = os.getenv('DIRECT_DATABASE_URL') or os.getenv('DATABASE_URL') or os.getenv('DATABASE_URL_POOLED')
         if not db_url:
-            raise ValueError("DIRECT_DATABASE_URL is not set in environment variables")
+            raise ValueError("Neither DIRECT_DATABASE_URL nor DATABASE_URL is set in environment variables")
         
         parsed = urlparse(db_url)
+        dbname = parsed.path[1:].split('?')[0] if parsed.path else 'postgres'
         return {
-            'dbname': parsed.path[1:],
-            'user': parsed.username,
-            'password': parsed.password,
+            'dbname': dbname,
+            'user': unquote(parsed.username) if parsed.username else '',
+            'password': unquote(parsed.password) if parsed.password else '',
             'host': parsed.hostname,
-            'port': parsed.port
+            'port': parsed.port or 5432
         }
 
     def get_db_connection(self):
@@ -144,11 +147,18 @@ Focus on creating content that is both informative for readers and optimized for
     def connect_to_imap(self, retry_count=5):
         for attempt in range(retry_count):
             try:
-                mail = imaplib.IMAP4_SSL("mail.newslettermonster.com", 993)
+                logger.info(f"Connecting to IMAP server {IMAP_SERVER}:{IMAP_PORT} as {EMAIL_USER}")
+                mail = imaplib.IMAP4_SSL(IMAP_SERVER, IMAP_PORT)
                 mail.login(EMAIL_USER, EMAIL_PASS)
                 return mail
             except imaplib.IMAP4.abort as e:
                 logger.error(f"IMAP connection error: {e}")
+                if attempt < retry_count - 1:
+                    time.sleep(5)
+                else:
+                    return None
+            except Exception as e:
+                logger.error(f"IMAP login/connect error: {e}")
                 if attempt < retry_count - 1:
                     time.sleep(5)
                 else:
