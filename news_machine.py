@@ -132,14 +132,37 @@ Focus on creating content that is both informative for readers and optimized for
         }
 
     def get_db_connection(self):
-        try:
-            db_config = self.get_db_config()
-            conn = psycopg2.connect(**db_config)
-            conn.autocommit = False
-            return conn
-        except Exception as e:
-            logger.error(f"Error connecting to database: {e}")
-            raise
+        db_config = self.get_db_config()
+        
+        # List of potential fallback configurations if connection is refused
+        configs_to_try = [db_config]
+        
+        # If port is 5432, also try Supabase pooler port 6543
+        if db_config.get('port') == 5432:
+            cfg6543 = db_config.copy()
+            cfg6543['port'] = 6543
+            configs_to_try.append(cfg6543)
+
+        # If running in Docker on same server, also try host.docker.internal / 172.17.0.1
+        for host in ['host.docker.internal', '172.17.0.1']:
+            if db_config.get('host') != host:
+                cfg_host = db_config.copy()
+                cfg_host['host'] = host
+                configs_to_try.append(cfg_host)
+
+        last_error = None
+        for cfg in configs_to_try:
+            try:
+                conn = psycopg2.connect(**cfg)
+                conn.autocommit = False
+                logger.info(f"Successfully connected to PostgreSQL at {cfg['host']}:{cfg['port']}")
+                return conn
+            except Exception as e:
+                last_error = e
+                logger.warning(f"Could not connect to PostgreSQL at {cfg['host']}:{cfg['port']} ({e}). Trying next configuration...")
+
+        logger.error(f"Error connecting to database after trying all fallback configurations: {last_error}")
+        raise last_error
 
     def connect_to_imap(self, retry_count=5):
         for attempt in range(retry_count):
