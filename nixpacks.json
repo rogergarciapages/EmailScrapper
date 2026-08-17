@@ -1,7 +1,14 @@
 {
   "providers": ["python"],
   "nixPkgs": [
-    "chromium"
+    "chromium",
+    "stdenv.cc.cc.lib",
+    "zlib"
+  ],
+  "aptPkgs": [
+    "libstdc++6",
+    "zlib1g",
+    "libgl1"
   ],
   "phases": {
     "install": {
