@@ -1,11 +1,41 @@
 import os
 import sys
 import glob
+import ctypes
 
-# Ensure virtualenv site-packages are in sys.path even if system python is executed by VPS/Coolify
+# 1. Ensure virtualenv site-packages are in sys.path even if system python is executed by VPS/Coolify
 for _site_pkg in glob.glob('/opt/venv/lib/python*/site-packages'):
     if _site_pkg not in sys.path:
         sys.path.insert(0, _site_pkg)
+
+# 2. Pre-load C/C++ runtime libraries (libstdc++.so.6, libgcc_s.so.1) into global symbol table
+_search_dirs = [
+    '/nix/profile/lib',
+    '/nix/var/nix/profiles/default/lib',
+    '/usr/lib/x86_64-linux-gnu',
+    '/usr/local/lib',
+    '/usr/lib',
+    '/lib/x86_64-linux-gnu',
+    '/lib',
+]
+_search_dirs.extend(glob.glob('/nix/store/*stdenv*/lib'))
+_search_dirs.extend(glob.glob('/nix/store/*gcc*/lib'))
+_search_dirs.extend(glob.glob('/nix/store/*glibc*/lib'))
+
+for _lib_name in ['libgcc_s.so.1', 'libstdc++.so.6']:
+    for _dir in _search_dirs:
+        _candidate = os.path.join(_dir, _lib_name)
+        if os.path.exists(_candidate):
+            try:
+                ctypes.CDLL(_candidate, mode=ctypes.RTLD_GLOBAL)
+                break
+            except Exception:
+                pass
+
+_valid_dirs = [d for d in _search_dirs if os.path.exists(d)]
+if _valid_dirs:
+    _curr_ld = os.environ.get('LD_LIBRARY_PATH', '')
+    os.environ['LD_LIBRARY_PATH'] = ':'.join(_valid_dirs) + (':' + _curr_ld if _curr_ld else '')
 
 import re
 import logging

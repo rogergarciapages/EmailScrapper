@@ -3,6 +3,7 @@
   "nixPkgs": [
     "chromium",
     "stdenv.cc.cc.lib",
+    "gcc-unwrapped",
     "zlib"
   ],
   "aptPkgs": [
