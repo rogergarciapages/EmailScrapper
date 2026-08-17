@@ -1,12 +1,13 @@
-FROM python:3.12-slim
+FROM mcr.microsoft.com/playwright/python:v1.48.0-noble
 
 WORKDIR /app
 
+# Install Python dependencies
 COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
-RUN pip install --no-cache-dir -r requirements.txt && \
-    playwright install --with-deps chromium
-
+# Copy application source code
 COPY . .
 
-CMD ["python", "news_machine.py"]
+# Default execution command
+CMD ["python", "news_machine.py"]
