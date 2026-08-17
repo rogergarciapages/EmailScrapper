@@ -126,10 +126,22 @@ Focus on creating content that is both informative for readers and optimized for
 
     def get_db_connection(self):
         try:
-            db_config = self.get_db_config()
-            conn = psycopg2.connect(**db_config)
-            conn.autocommit = False
-            return conn
+            db_url = os.getenv('DIRECT_DATABASE_URL') or os.getenv('DATABASE_URL') or os.getenv('DATABASE_URL_POOLED')
+            if not db_url:
+                raise ValueError("Neither DIRECT_DATABASE_URL nor DATABASE_URL is set in environment variables")
+            
+            db_url = db_url.strip('"').strip("'")
+            
+            try:
+                conn = psycopg2.connect(dsn=db_url)
+                conn.autocommit = False
+                return conn
+            except Exception as dsn_err:
+                logger.warning(f"Direct DSN connection failed ({dsn_err}), trying parsed parameters...")
+                db_config = self.get_db_config()
+                conn = psycopg2.connect(**db_config)
+                conn.autocommit = False
+                return conn
         except Exception as e:
             logger.error(f"Error connecting to database: {e}")
             raise
@@ -188,12 +200,28 @@ Focus on creating content that is both informative for readers and optimized for
             with open(file_path, 'rb') as f:
                 file_bytes = f.read()
 
-            supabase_client.storage.from_(SUPABASE_BUCKET).upload(
-                file=file_bytes,
-                path=storage_path,
-                file_options={"content-type": content_type, "upsert": "true"}
-            )
-            
+            try:
+                supabase_client.storage.from_(SUPABASE_BUCKET).upload(
+                    file=file_bytes,
+                    path=storage_path,
+                    file_options={"content-type": content_type, "upsert": "true"}
+                )
+            except Exception as upload_err:
+                if "Bucket not found" in str(upload_err):
+                    logger.info(f"Bucket '{SUPABASE_BUCKET}' not found in Supabase. Attempting auto-creation...")
+                    try:
+                        supabase_client.storage.create_bucket(SUPABASE_BUCKET, options={"public": True})
+                        supabase_client.storage.from_(SUPABASE_BUCKET).upload(
+                            file=file_bytes,
+                            path=storage_path,
+                            file_options={"content-type": content_type, "upsert": "true"}
+                        )
+                    except Exception as create_err:
+                        logger.error(f"Could not auto-create bucket '{SUPABASE_BUCKET}': {create_err}")
+                        raise upload_err
+                else:
+                    raise upload_err
+
             public_url = supabase_client.storage.from_(SUPABASE_BUCKET).get_public_url(storage_path)
             logger.info(f"Uploaded to Supabase Storage: {public_url}")
 
