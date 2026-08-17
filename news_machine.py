@@ -23,7 +23,7 @@ from urllib.parse import urlparse, unquote
 from dateutil import parser as dateutil_parser
 from typing import Dict, List, Optional
 import anthropic
-from anthropic import Anthropic
+from anthropic import AsyncAnthropic
 import aiohttp
 from pprint import pformat
 
@@ -48,6 +48,7 @@ BARD_API_KEY = os.getenv('BARD_API_KEY')
 TOGETHER_API_KEY = os.getenv('TOGETHER_API_KEY')
 HUGGINGFACE_API_KEY = os.getenv('HUGGINGFACE_API_KEY')
 DEEPSEEK_API_KEY = os.getenv('DEEPSEEK_API')
+OPENROUTER_API_KEY = os.getenv('OPENROUTER_API_KEY')
 
 class NewsletterProcessor:
     def __init__(self):
@@ -64,11 +65,16 @@ class NewsletterProcessor:
         
         # Initialize Anthropic
         anthropic_api_key = os.getenv('ANTHROPIC_API')
-        self.anthropic = Anthropic(api_key=anthropic_api_key)
+        self.anthropic = AsyncAnthropic(api_key=anthropic_api_key)
         
         # Initialize Together AI settings
         self.TOGETHER_API_URL = "https://api.together.xyz/inference"
         self.TOGETHER_MODEL = "mistralai/Mixtral-8x7B-Instruct-v0.1"
+        
+        # Initialize OpenRouter API
+        self.OPENROUTER_API_KEY = os.getenv('OPENROUTER_API_KEY')
+        self.OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
+        self.OPENROUTER_MODEL = os.getenv('OPENROUTER_MODEL', 'google/gemini-2.0-flash-001')
         
         # Initialize Hugging Face settings
         self.HUGGINGFACE_API_URL = "https://api-inference.huggingface.co/models/mistralai/Mixtral-8x7B-Instruct-v0.1"
@@ -80,12 +86,14 @@ class NewsletterProcessor:
         self.last_huggingface_call = 0
         self.last_gemini2_call = 0
         self.last_deepseek_call = 0
+        self.last_openrouter_call = 0
         self.gemini_calls = 0
         self.anthropic_calls = 0
         self.together_calls = 0
         self.huggingface_calls = 0
         self.gemini2_calls = 0
         self.deepseek_calls = 0
+        self.openrouter_calls = 0
         self.reset_time = time.time()
         
         # Rate limits
@@ -94,6 +102,7 @@ class NewsletterProcessor:
         self.TOGETHER_CALLS_PER_MINUTE = 50
         self.HUGGINGFACE_CALLS_PER_MINUTE = 30
         self.DEEPSEEK_CALLS_PER_MINUTE = 20
+        self.OPENROUTER_CALLS_PER_MINUTE = 50
         self.MIN_DELAY_BETWEEN_CALLS = 1
         
         self.system_prompt = """You are an AI trained to analyze newsletters and create engaging, SEO-friendly summaries.
@@ -318,9 +327,27 @@ Focus on creating content that is both informative for readers and optimized for
             self.huggingface_calls = 0
             self.gemini2_calls = 0
             self.deepseek_calls = 0
+            self.openrouter_calls = 0
             self.reset_time = current_time
         
-        if api_type == 'gemini':
+        if api_type == 'openrouter':
+            time_since_last_call = current_time - self.last_openrouter_call
+            if time_since_last_call < self.MIN_DELAY_BETWEEN_CALLS:
+                await asyncio.sleep(self.MIN_DELAY_BETWEEN_CALLS - time_since_last_call)
+            
+            if self.openrouter_calls >= self.OPENROUTER_CALLS_PER_MINUTE:
+                wait_time = 60 - (current_time - self.reset_time)
+                if wait_time > 0:
+                    logger.info(f"Waiting {wait_time:.2f}s for OpenRouter rate limit reset")
+                    await asyncio.sleep(wait_time)
+                self.openrouter_calls = 0
+                self.reset_time = time.time()
+            
+            self.last_openrouter_call = time.time()
+            self.openrouter_calls += 1
+            
+        elif api_type == 'gemini':
+
             time_since_last_call = current_time - self.last_gemini_call
             if time_since_last_call < self.MIN_DELAY_BETWEEN_CALLS:
                 await asyncio.sleep(self.MIN_DELAY_BETWEEN_CALLS - time_since_last_call)
@@ -847,6 +874,61 @@ Content: {text_content}
         except Exception as e:
             logger.error(f"DeepSeek API error: {str(e)}")
             logger.error(traceback.format_exc())
+    async def _generate_content_with_openrouter(self, text_content: str, subject: str) -> Optional[Dict]:
+        """Generate content using OpenRouter API with rate limiting."""
+        if not self.OPENROUTER_API_KEY:
+            return None
+            
+        try:
+            await self._wait_for_rate_limit('openrouter')
+            headers = {
+                "Authorization": f"Bearer {self.OPENROUTER_API_KEY}",
+                "HTTP-Referer": "https://newsletterzilla.online",
+                "X-Title": "Newsletterzilla Scraper",
+                "Content-Type": "application/json"
+            }
+            
+            messages = [
+                {
+                    "role": "system",
+                    "content": self.system_prompt
+                },
+                {
+                    "role": "user",
+                    "content": f"Subject: {subject}\n\nContent: {text_content}"
+                }
+            ]
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    self.OPENROUTER_API_URL,
+                    headers=headers,
+                    json={
+                        "model": self.OPENROUTER_MODEL,
+                        "messages": messages,
+                        "temperature": 0.7,
+                        "max_tokens": 1500
+                    }
+                ) as response:
+                    response_text = await response.text()
+                    if response.status != 200:
+                        logger.error(f"OpenRouter API error status {response.status}: {response_text}")
+                        raise Exception(f"OpenRouter API error: {response.status} - {response_text}")
+                    
+                    result = await response.json()
+                    generated_text = result.get('choices', [{}])[0].get('message', {}).get('content', '')
+                    
+                    if generated_text:
+                        analysis = self._parse_llm_response(generated_text)
+                        self._log_llm_output(f"OpenRouter ({self.OPENROUTER_MODEL})", analysis)
+                        return analysis
+                    else:
+                        logger.error("OpenRouter API returned empty response")
+                        return None
+                        
+        except Exception as e:
+            logger.error(f"OpenRouter API error: {str(e)}")
+            logger.error(traceback.format_exc())
             return None
 
     async def process_email(self, email_content: str, subject: str) -> Dict:
@@ -859,7 +941,12 @@ Content: {text_content}
         
         analysis = {}
         try:
-            # Try Google AI Studio API (Gemini 2.0) first
+            # Try OpenRouter API first if available
+            analysis = await self._generate_content_with_openrouter(text_content, subject)
+            if analysis:
+                return analysis
+
+            # Try Google AI Studio API (Gemini 2.0) second
             analysis = await self._generate_content_with_gemini2(text_content, subject)
             if analysis:
                 return analysis

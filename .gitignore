@@ -6,3 +6,5 @@
 /venv/
 /Old/
 .env
+__pycache__/
+*.pyc
