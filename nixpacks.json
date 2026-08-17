@@ -13,6 +13,6 @@
     }
   },
   "start": {
-    "cmd": "python news_machine.py"
+    "cmd": "/opt/venv/bin/python news_machine.py"
   }
 }

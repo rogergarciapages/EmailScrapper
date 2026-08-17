@@ -1,4 +1,12 @@
 import os
+import sys
+import glob
+
+# Ensure virtualenv site-packages are in sys.path even if system python is executed by VPS/Coolify
+for _site_pkg in glob.glob('/opt/venv/lib/python*/site-packages'):
+    if _site_pkg not in sys.path:
+        sys.path.insert(0, _site_pkg)
+
 import re
 import logging
 import traceback
