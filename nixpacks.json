@@ -6,9 +6,9 @@
   "phases": {
     "install": {
       "cmds": [
-        "pip install --upgrade pip",
-        "pip install -r requirements.txt",
-        "playwright install chromium"
+        "python -m venv /opt/venv",
+        "/opt/venv/bin/pip install -r requirements.txt",
+        "/opt/venv/bin/playwright install chromium"
       ]
     }
   },
