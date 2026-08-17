@@ -6,14 +6,13 @@
   "phases": {
     "install": {
       "cmds": [
-        "python -m venv /opt/venv",
-        "/opt/venv/bin/pip install --upgrade pip",
-        "/opt/venv/bin/pip install -r requirements.txt",
-        "/opt/venv/bin/playwright install chromium"
+        "pip install --upgrade pip",
+        "pip install -r requirements.txt",
+        "playwright install chromium"
       ]
     }
   },
   "start": {
-    "cmd": "/opt/venv/bin/python news_machine.py"
+    "cmd": "python news_machine.py"
   }
 }
