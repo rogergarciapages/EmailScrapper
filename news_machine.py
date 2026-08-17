@@ -114,34 +114,29 @@ Focus on creating content that is both informative for readers and optimized for
         if not db_url:
             raise ValueError("Neither DIRECT_DATABASE_URL nor DATABASE_URL is set in environment variables")
         
-        parsed = urlparse(db_url)
-        dbname = parsed.path[1:].split('?')[0] if parsed.path else 'postgres'
+        # Strip literal quotes, escaped backslashes, and whitespace
+        clean_url = db_url.strip('"\'' + '\\').strip()
+        
+        # Remove query parameters like ?schema=public
+        if '?' in clean_url:
+            clean_url = clean_url.split('?')[0]
+            
+        parsed = urlparse(clean_url)
+        dbname = parsed.path.lstrip('/') if parsed.path else 'postgres'
         return {
             'dbname': dbname,
             'user': unquote(parsed.username) if parsed.username else '',
             'password': unquote(parsed.password) if parsed.password else '',
-            'host': parsed.hostname,
+            'host': parsed.hostname or 'supabasenewsletter.oncewerehumans.com',
             'port': parsed.port or 5432
         }
 
     def get_db_connection(self):
         try:
-            db_url = os.getenv('DIRECT_DATABASE_URL') or os.getenv('DATABASE_URL') or os.getenv('DATABASE_URL_POOLED')
-            if not db_url:
-                raise ValueError("Neither DIRECT_DATABASE_URL nor DATABASE_URL is set in environment variables")
-            
-            db_url = db_url.strip('"').strip("'")
-            
-            try:
-                conn = psycopg2.connect(dsn=db_url)
-                conn.autocommit = False
-                return conn
-            except Exception as dsn_err:
-                logger.warning(f"Direct DSN connection failed ({dsn_err}), trying parsed parameters...")
-                db_config = self.get_db_config()
-                conn = psycopg2.connect(**db_config)
-                conn.autocommit = False
-                return conn
+            db_config = self.get_db_config()
+            conn = psycopg2.connect(**db_config)
+            conn.autocommit = False
+            return conn
         except Exception as e:
             logger.error(f"Error connecting to database: {e}")
             raise
