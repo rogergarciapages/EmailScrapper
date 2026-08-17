@@ -1,12 +1,9 @@
 {
   "providers": ["python"],
-  "pkgs": [
+  "nixPkgs": [
     "chromium"
   ],
   "phases": {
-    "setup": {
-      "nixPkgs": ["python3", "pip", "chromium"]
-    },
     "install": {
       "cmds": [
         "python -m venv /opt/venv",
