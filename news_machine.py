@@ -56,10 +56,26 @@ OPENROUTER_API_KEY = os.getenv('OPENROUTER_API_KEY')
 
 class NewsletterProcessor:
     def __init__(self):
-        # Initialize OpenRouter API
+        # Initialize OpenRouter API & Free Models Fallback List
         self.OPENROUTER_API_KEY = os.getenv('OPENROUTER_API_KEY')
         self.OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
-        self.OPENROUTER_MODEL = os.getenv('OPENROUTER_MODEL', 'google/gemini-2.0-flash-001')
+        
+        default_free_models = [
+            "google/gemini-2.0-flash-exp:free",
+            "meta-llama/llama-3.3-70b-instruct:free",
+            "deepseek/deepseek-r1:free",
+            "qwen/qwen-2.5-coder-32b-instruct:free",
+            "mistralai/mistral-small-24b-instruct-2501:free",
+            "google/gemma-2-9b-it:free",
+            "meta-llama/llama-3.1-8b-instruct:free",
+            "google/gemini-2.0-flash-001"
+        ]
+        
+        env_models = os.getenv('OPENROUTER_MODELS') or os.getenv('OPENROUTER_MODEL')
+        if env_models:
+            self.OPENROUTER_MODELS = [m.strip() for m in env_models.split(',') if m.strip()]
+        else:
+            self.OPENROUTER_MODELS = default_free_models
         
         # Rate limiting setup
         self.last_openrouter_call = 0
@@ -532,61 +548,67 @@ Focus on creating content that is both informative for readers and optimized for
             return {}
 
     async def _generate_content_with_openrouter(self, text_content: str, subject: str) -> Optional[Dict]:
-        """Generate content using OpenRouter API with rate limiting."""
+        """Generate content by attempting free OpenRouter models sequentially until one succeeds."""
         if not self.OPENROUTER_API_KEY:
+            logger.warning("OPENROUTER_API_KEY is not set.")
             return None
             
-        try:
-            await self._wait_for_rate_limit('openrouter')
-            headers = {
-                "Authorization": f"Bearer {self.OPENROUTER_API_KEY}",
-                "HTTP-Referer": "https://newsletterzilla.online",
-                "X-Title": "Newsletterzilla Scraper",
-                "Content-Type": "application/json"
+        headers = {
+            "Authorization": f"Bearer {self.OPENROUTER_API_KEY}",
+            "HTTP-Referer": "https://newsletterzilla.online",
+            "X-Title": "Newsletterzilla Scraper",
+            "Content-Type": "application/json"
+        }
+        
+        messages = [
+            {
+                "role": "system",
+                "content": self.system_prompt
+            },
+            {
+                "role": "user",
+                "content": f"Subject: {subject}\n\nContent: {text_content}"
             }
-            
-            messages = [
-                {
-                    "role": "system",
-                    "content": self.system_prompt
-                },
-                {
-                    "role": "user",
-                    "content": f"Subject: {subject}\n\nContent: {text_content}"
-                }
-            ]
-            
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    self.OPENROUTER_API_URL,
-                    headers=headers,
-                    json={
-                        "model": self.OPENROUTER_MODEL,
-                        "messages": messages,
-                        "temperature": 0.7,
-                        "max_tokens": 1500
-                    }
-                ) as response:
-                    response_text = await response.text()
-                    if response.status != 200:
-                        logger.error(f"OpenRouter API error status {response.status}: {response_text}")
-                        raise Exception(f"OpenRouter API error: {response.status} - {response_text}")
-                    
-                    result = await response.json()
-                    generated_text = result.get('choices', [{}])[0].get('message', {}).get('content', '')
-                    
-                    if generated_text:
-                        analysis = self._parse_llm_response(generated_text)
-                        self._log_llm_output(f"OpenRouter ({self.OPENROUTER_MODEL})", analysis)
-                        return analysis
-                    else:
-                        logger.error("OpenRouter API returned empty response")
-                        return None
+        ]
+        
+        for model in self.OPENROUTER_MODELS:
+            try:
+                await self._wait_for_rate_limit('openrouter')
+                logger.info(f"Attempting OpenRouter model: '{model}'")
+                
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(
+                        self.OPENROUTER_API_URL,
+                        headers=headers,
+                        json={
+                            "model": model,
+                            "messages": messages,
+                            "temperature": 0.7,
+                            "max_tokens": 1500
+                        }
+                    ) as response:
+                        response_text = await response.text()
+                        if response.status != 200:
+                            logger.warning(f"OpenRouter model '{model}' status {response.status}: {response_text}. Trying next free model...")
+                            continue
                         
-        except Exception as e:
-            logger.error(f"OpenRouter API error: {str(e)}")
-            logger.error(traceback.format_exc())
-            return None
+                        result = await response.json()
+                        generated_text = result.get('choices', [{}])[0].get('message', {}).get('content', '')
+                        
+                        if generated_text:
+                            analysis = self._parse_llm_response(generated_text)
+                            self._log_llm_output(f"OpenRouter ({model})", analysis)
+                            return analysis
+                        else:
+                            logger.warning(f"OpenRouter model '{model}' returned empty response. Trying next free model...")
+                            continue
+                            
+            except Exception as e:
+                logger.warning(f"Error with OpenRouter model '{model}': {e}. Trying next free model...")
+                continue
+                
+        logger.error("All configured free OpenRouter models failed.")
+        return None
 
     async def process_email(self, email_content: str, subject: str) -> Dict:
         """Process email content to extract summary and metadata using OpenRouter."""
